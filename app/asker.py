@@ -79,10 +79,8 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
         page = ctx.new_page()
 
         page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
-        try:
-            page.wait_for_load_state("networkidle", timeout=20000)
-        except Exception:
-            pass
+        # 不等 networkidle(豆包有心跳长连接永远达不到, 只会白等满超时);
+        # 后面的输入框轮询本身就是就绪检测
 
         cur = page.url or ""
         if "/login" in cur or "passport" in cur:
