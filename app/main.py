@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from . import scheduler as scheduler_mod
 from . import store
 from .bitclient import BitBrowserError, BitClient
+from .llm import LLMError, test_model
 from .logs import add_log, get_logs, last_id
 from .task_runner import run_async
 
@@ -163,8 +164,6 @@ TASK_EDITABLE = set(store.TASK_DEFAULTS.keys())
 
 def _clean_task(patch: dict) -> dict:
     data = {k: v for k, v in (patch or {}).items() if k in TASK_EDITABLE}
-    if "tags" in data and isinstance(data["tags"], list):
-        data["tags"] = [str(t).strip().lstrip("#") for t in data["tags"] if str(t).strip()]
     if "fetch_count" in data:
         data["fetch_count"] = max(1, int(data["fetch_count"] or 1))
     if "daily_limit_per_window" in data:
@@ -247,6 +246,75 @@ def run_task_now(tid: str, body: Optional[dict] = Body(default=None)):
     only_window = (body or {}).get("window_id")
     run_async(tid, only_window)
     return {"ok": True, "msg": "已在后台开始执行，请到【运行日志】查看进展"}
+
+
+# ---------------- AI 模型 ----------------
+
+MODEL_EDITABLE = {"name", "provider", "api_base", "model", "api_key", "enabled"}
+
+
+def _mask_model(m: dict) -> dict:
+    """API Key 不回传明文, 仅返回是否已配置"""
+    out = {k: v for k, v in m.items() if k != "api_key"}
+    out["has_key"] = bool((m.get("api_key") or "").strip())
+    return out
+
+
+@app.get("/api/models")
+def get_models():
+    return {"models": [_mask_model(m) for m in store.list_models()]}
+
+
+@app.post("/api/models")
+def add_model(body: dict = Body(...)):
+    data = {k: body.get(k) for k in MODEL_EDITABLE if k in body}
+    if not (data.get("name") or "").strip():
+        raise HTTPException(400, "模型名称不能为空")
+    if not (data.get("api_base") or "").strip() or not (data.get("model") or "").strip():
+        raise HTTPException(400, "接口地址与模型名称不能为空")
+    data["api_key"] = str(data.get("api_key") or "").strip()
+    m = store.upsert_model(data)
+    add_log(f"已添加AI模型[{m['name']}]")
+    return _mask_model(m)
+
+
+@app.put("/api/models/{mid}")
+def update_model(mid: str, body: dict = Body(...)):
+    cur = store.get_model(mid)
+    if not cur:
+        raise HTTPException(404, "模型不存在")
+    data = {k: v for k, v in body.items() if k in MODEL_EDITABLE and k != "id"}
+    # api_key 语义: 字段缺失=保持不变; 空串=清除; 非空=更新
+    if "api_key" in data:
+        data["api_key"] = str(data.get("api_key") or "").strip()
+    m = store.upsert_model({"id": mid, **data})
+    add_log(f"AI模型[{m['name']}] 已更新" + ("，API Key 已变更" if "api_key" in data else ""))
+    return _mask_model(m)
+
+
+@app.delete("/api/models/{mid}")
+def remove_model(mid: str):
+    m = store.get_model(mid)
+    store.delete_model(mid)
+    if m:
+        add_log(f"AI模型[{m['name']}] 已删除")
+    return {"ok": True}
+
+
+@app.post("/api/models/{mid}/test")
+def model_test(mid: str):
+    m = store.get_model(mid)
+    if not m:
+        raise HTTPException(404, "模型不存在")
+    if not (m.get("api_key") or "").strip():
+        raise HTTPException(400, "请先填写并保存该模型的 API Key")
+    try:
+        reply = test_model(m)
+    except LLMError as e:
+        add_log(f"模型[{m['name']}]联通测试失败: {e}", "error")
+        raise HTTPException(400, f"联通失败: {e}")
+    add_log(f"模型[{m['name']}]联通测试成功: {reply}")
+    return {"ok": True, "reply": reply}
 
 
 # ---------------- 窗口配置 ----------------

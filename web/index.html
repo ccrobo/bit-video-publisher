@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>比特视窗 - 抖音自动发布助手</title>
+<title>比特视窗 - 多平台自动发布助手</title>
 <link href="https://unpkg.com/element-plus@2.7.6/dist/index.css" rel="stylesheet">
 <script src="https://unpkg.com/vue@3.4.31/dist/vue.global.prod.js"></script>
 <script src="https://unpkg.com/element-plus@2.7.6/dist/index.full.min.js"></script>
@@ -25,13 +25,20 @@
   .log-line .t { color: #5d6a7a; margin-right: 8px; }
   .log-line.err { color: #ff7875; } .log-line.warn { color: #ffc53d; } .log-line.info { color: #95de64; }
   .muted { color: #909399; font-size: 12px; }
+  .plat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .plat-card { border: 2px solid #e4e7ed; border-radius: 10px; padding: 18px 8px; text-align: center; cursor: pointer; transition: all .15s; user-select: none; }
+  .plat-card:hover { border-color: #b1d2ff; }
+  .plat-card.sel { border-color: #409eff; background: #ecf5ff; }
+  .plat-card.dis { opacity: .45; cursor: not-allowed; background: #fafafa; }
+  .plat-card .pl-name { font-size: 15px; font-weight: 600; color: #303133; }
+  .plat-card .pl-sub { font-size: 12px; color: #909399; margin-top: 6px; }
 </style>
 </head>
 <body>
 <div id="app" v-cloak>
   <div class="hd">
-    <h1>比特视窗 · 抖音自动发布助手</h1>
-    <span class="sub">比特浏览器窗口管理 / 视频定时抓取 / 创作中心自动发布</span>
+    <h1>比特视窗 · 多平台自动发布助手</h1>
+    <span class="sub">比特浏览器窗口 / 内容源抓取 / AI内容整理 / 多平台定时发布</span>
     <el-tag :type="status.bit_running ? 'success' : 'danger'" effect="dark" size="small">
       比特浏览器 {{ status.bit_running ? '运行中' : '未运行' }}
     </el-tag>
@@ -51,12 +58,12 @@
         <div class="card"><div class="k">发布任务</div><div class="v">{{ status.task_enabled }} <span class="muted">/ {{ status.task_total }} 启用中</span></div></div>
       </div>
       <div class="steps-tips">
-        <b>使用流程：</b><br>
-        1.【系统设置】确认比特浏览器安装路径（未打开时会自动本地拉起）；<br>
+        <b>使用流程（四步向导式建任务）：</b><br>
+        1.【系统设置】确认比特浏览器安装路径与AI默认提示词；<br>
         2.【总览】点击「同步窗口与分组」抓取现有窗口；<br>
-        3.【发布任务】新建任务：配置视频源URL（如豆包定时任务结果接口）、文案来源、执行周期（cron）、目标分组/窗口；<br>
-        4.【窗口管理】按分组查看窗口，为每个窗口开启「抓取发布」并绑定任务，也可勾选多个窗口批量设置；<br>
-        5. 到点自动执行：抓取最新视频与文案 → 打开对应窗口 → 进入抖音创作中心上传发布 → 记录日志。
+        3.【AI 模型】为预置模型(DeepSeek/混元/GLM/Kimi/MiniMax/Qwen)填入 API Key 并联通测试，也可添加自定义模型；<br>
+        4.【发布任务】新建任务四步：内容源 → AI整理 → 发布平台 → 目标与计划；<br>
+        5.【窗口管理】为每个窗口开启「抓取发布」并绑定任务；到点自动执行：抓取视频与文字材料 → AI整理标题/描述/标签 → 打开对应窗口自动发布。
       </div>
     </el-tab-pane>
 
@@ -162,17 +169,27 @@
     <el-tab-pane label="发布任务" name="tasks">
       <div class="toolbar">
         <el-button type="primary" @click="newTask">+ 新建任务</el-button>
-        <span class="muted">任务到点自动：抓最新视频 -> 抓文案 -> 打开窗口 -> 抖音创作中心发布</span>
+        <span class="muted">四步向导：内容源 → AI整理 → 发布平台 → 目标与计划</span>
       </div>
       <el-table :data="tasks" border stripe>
         <el-table-column prop="name" label="任务名" width="130" show-overflow-tooltip></el-table-column>
-        <el-table-column label="平台" width="70"><template #default="{row}">抖音</template></el-table-column>
-        <el-table-column prop="source_url" label="视频源URL" min-width="180" show-overflow-tooltip></el-table-column>
-        <el-table-column prop="cron" label="周期(cron)" width="110"></el-table-column>
-        <el-table-column label="目标" min-width="150">
+        <el-table-column label="平台" width="80">
+          <template #default="{row}">{{ platformLabel(row.platform) }}</template>
+        </el-table-column>
+        <el-table-column label="内容源" width="120">
           <template #default="{row}">
-            <el-tag size="small" v-if="(row.target_group_ids||[]).length">分组x{{row.target_group_ids.length}}</el-tag>
+            <el-tag size="small" v-if="row.source_type==='doubao_page'">豆包聊天页</el-tag>
+            <el-tag size="small" type="info" v-else>JSON接口</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="AI模型" min-width="130">
+          <template #default="{row}">{{ modelName(row.ai_model_id) }}</template>
+        </el-table-column>
+        <el-table-column prop="cron" label="周期(cron)" width="110"></el-table-column>
+        <el-table-column label="目标" min-width="140">
+          <template #default="{row}">
             <el-tag size="small" type="success" v-if="(row.target_window_ids||[]).length">窗口x{{row.target_window_ids.length}}</el-tag>
+            <span v-else class="muted">未选择</span>
           </template>
         </el-table-column>
         <el-table-column label="启用" width="70">
@@ -191,98 +208,135 @@
         </el-table-column>
       </el-table>
 
-      <el-dialog v-model="taskVisible" :title="taskForm.id ? '编辑任务' : '新建任务'" width="680" top="4vh">
-        <el-form :model="taskForm" label-width="130px">
-          <el-row :gutter="12">
-            <el-col :span="12"><el-form-item label="任务名称" required>
-              <el-input v-model="taskForm.name" placeholder="例如：豆包每日视频发布"></el-input></el-form-item></el-col>
-            <el-col :span="12"><el-form-item label="发布平台">
-              <el-select v-model="taskForm.platform" style="width:100%">
-                <el-option label="抖音" value="douyin"></el-option>
-              </el-select></el-form-item></el-col>
-            <el-col :span="12"><el-form-item label="源类型">
-              <el-select v-model="taskForm.source_type" style="width:100%">
-                <el-option label="JSON 接口" value="json"></el-option>
-                <el-option label="豆包聊天页(浏览器抓取)" value="doubao_page"></el-option>
-              </el-select></el-form-item></el-col>
-          </el-row>
-          <el-form-item v-if="taskForm.source_type!=='doubao_page'" label="视频源URL" required>
-            <el-input v-model="taskForm.source_url" placeholder="返回JSON的接口地址"></el-input>
-          </el-form-item>
-          <el-row v-if="taskForm.source_type==='doubao_page'" :gutter="12">
-            <el-col :span="10"><el-form-item label="等待加载(秒)">
-              <el-input-number v-model="taskForm.source_wait" :min="5" :max="120" style="width:100%"></el-input-number>
-              <div class="muted">每个窗口打开自己的聊天页链接抓取，需该窗口已登录豆包</div>
-            </el-form-item></el-col>
-          </el-row>
-          <el-row v-if="taskForm.source_type!=='doubao_page'" :gutter="12">
-            <el-col :span="8"><el-form-item label="列表路径">
-              <el-input v-model="taskForm.items_path" placeholder="data 或 data.list"></el-input></el-form-item></el-col>
-            <el-col :span="8"><el-form-item label="标题字段">
-              <el-input v-model="taskForm.field_title"></el-input></el-form-item></el-col>
-            <el-col :span="8"><el-form-item label="视频地址字段">
-              <el-input v-model="taskForm.field_video"></el-input></el-form-item></el-col>
-          </el-row>
-          <el-row :gutter="12">
-            <el-col :span="8"><el-form-item label="每次抓取条数">
-              <el-input-number v-model="taskForm.fetch_count" :min="1" :max="20" style="width:100%"></el-input-number></el-form-item></el-col>
-            <el-col :span="16"><el-form-item label="执行周期 cron">
-              <el-select v-model="taskForm.cron" filterable allow-create default-first-option style="width:100%">
-                <el-option v-for="c in cronPresets" :key="c.v" :label="c.l + ' (' + c.v + ')'" :value="c.v"></el-option>
-              </el-select></el-form-item></el-col>
-          </el-row>
-          <el-divider content-position="left">文案设置</el-divider>
-          <el-form-item v-if="taskForm.source_type!=='doubao_page'" label="文案源URL">
-            <el-input v-model="taskForm.captions_url" placeholder="可选。返回JSON字符串数组，将轮换使用；豆包模式自动从页面提取文案"></el-input>
-          </el-form-item>
-          <el-form-item label="文案模板">
-            <el-input v-model="taskForm.caption_template" type="textarea" :rows="2" placeholder="支持 {title} 视频标题、{date} 日期"></el-input>
-          </el-form-item>
-          <el-form-item label="话题标签">
-            <el-input :model-value="(taskForm.tags||[]).join(',')" @update:model-value="v=>taskForm.tags=v.split(/[,，]/).map(s=>s.trim()).filter(Boolean)" placeholder="逗号分隔，例如：生活记录,AI视频"></el-input>
-          </el-form-item>
-          <el-divider content-position="left">发布目标与限制</el-divider>
-          <el-form-item label="目标分组">
-            <el-select v-model="taskForm.target_group_ids" multiple style="width:100%" placeholder="可选：筛选下方候选窗口"
-                       @change="onTaskGroupsChange">
-              <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id"></el-option>
-            </el-select>
-            <div class="muted">选分组后，下方「目标窗口」仅显示组内窗口；不选则显示全部窗口</div>
-          </el-form-item>
-          <el-form-item label="目标窗口">
-            <el-select v-model="taskForm.target_window_ids" multiple style="width:100%" filterable placeholder="勾选要发布的窗口（需在窗口管理中开启）">
-              <el-option v-for="w in taskWindowOptions" :key="w.id" :label="w.seq + ' - ' + w.name" :value="w.id"></el-option>
-            </el-select>
-          </el-form-item>
-          <template v-if="taskForm.source_type==='doubao_page'">
-            <el-divider content-position="left">各窗口聊天页链接（必填）</el-divider>
-            <el-form-item v-if="!taskTargets.length" label="目标窗口">
-              <div class="muted">请先在上方选择目标分组或窗口</div>
+      <el-dialog v-model="taskVisible" :title="taskForm.id ? '编辑任务' : '新建任务'" width="760" top="3vh" :close-on-click-modal="false">
+        <el-steps :active="step" finish-status="success" simple style="margin-bottom:20px">
+          <el-step title="内容源"></el-step>
+          <el-step title="AI整理"></el-step>
+          <el-step title="发布平台"></el-step>
+          <el-step title="目标与计划"></el-step>
+        </el-steps>
+
+        <!-- 步骤1: 内容源 -->
+        <div v-show="step===0">
+          <el-form :model="taskForm" label-width="130px">
+            <el-row :gutter="12">
+              <el-col :span="12"><el-form-item label="任务名称" required>
+                <el-input v-model="taskForm.name" placeholder="例如：豆包每日视频发布"></el-input></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="内容源类型">
+                <el-select v-model="taskForm.source_type" style="width:100%">
+                  <el-option label="豆包聊天页(浏览器抓取)" value="doubao_page"></el-option>
+                  <el-option label="JSON 接口" value="json"></el-option>
+                </el-select>
+                <div class="muted">后续将支持：WorkBuddy / 千问 / 元宝 / 语雀 / 可灵 / 即梦</div>
+              </el-form-item></el-col>
+            </el-row>
+            <template v-if="taskForm.source_type!=='doubao_page'">
+              <el-form-item label="视频源URL" required>
+                <el-input v-model="taskForm.source_url" placeholder="返回JSON的接口地址"></el-input>
+              </el-form-item>
+              <el-row :gutter="12">
+                <el-col :span="8"><el-form-item label="列表路径">
+                  <el-input v-model="taskForm.items_path" placeholder="data 或 data.list"></el-input></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="标题字段">
+                  <el-input v-model="taskForm.field_title"></el-input></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="视频地址字段">
+                  <el-input v-model="taskForm.field_video"></el-input></el-form-item></el-col>
+              </el-row>
+            </template>
+            <el-form-item v-if="taskForm.source_type==='doubao_page'" label="等待加载(秒)">
+              <el-input-number v-model="taskForm.source_wait" :min="5" :max="120"></el-input-number>
+              <span class="muted" style="margin-left:8px">每个窗口打开自己的聊天页链接抓取，需该窗口已登录豆包</span>
             </el-form-item>
-            <el-form-item v-for="tw in taskTargets" :key="tw.id" :label="tw.seq + ' - ' + tw.name" label-width="170px" required>
-              <el-input :model-value="(taskForm.window_vars[tw.id] && taskForm.window_vars[tw.id].source_url) || ''"
-                        placeholder="必填：该窗口专属的豆包聊天页链接，如 https://www.doubao.com/chat/xxxx"
-                        @update:model-value="v => setWinVar(tw.id, v)"></el-input>
+          </el-form>
+        </div>
+
+        <!-- 步骤2: AI整理 -->
+        <div v-show="step===1">
+          <el-form :model="taskForm" label-width="130px">
+            <el-form-item label="推理模型" required>
+              <el-select v-model="taskForm.ai_model_id" style="width:100%" placeholder="选择用于内容整理的模型">
+                <el-option v-for="m in models.filter(x=>x.enabled)" :key="m.id"
+                           :label="m.name + (m.has_key ? '' : '（未配置Key）')" :value="m.id"
+                           :disabled="!m.has_key"></el-option>
+              </el-select>
+              <div class="muted">在【AI 模型】页可配置各模型的 API Key 并联通测试；未配置Key的模型不可选，执行时将用原文兜底</div>
             </el-form-item>
-          </template>
-          <el-row :gutter="12">
-            <el-col :span="12"><el-form-item label="单窗口日上限">
-              <el-input-number v-model="taskForm.daily_limit_per_window" :min="0" :max="50" style="width:100%"></el-input-number>
-              <div class="muted">0 表示不限制</div></el-form-item></el-col>
-            <el-col :span="12"><el-form-item label="发布后关窗">
-              <el-select v-model="taskForm.close_after_publish" style="width:100%">
-                <el-option label="跟随全局设置" :value="null"></el-option>
-                <el-option label="是" :value="true"></el-option>
-                <el-option label="否" :value="false"></el-option>
-              </el-select></el-form-item></el-col>
-          </el-row>
-          <el-form-item label="是否启用">
-            <el-switch v-model="taskForm.enabled"></el-switch>
-          </el-form-item>
-        </el-form>
+            <el-form-item label="处理提示词">
+              <el-input v-model="taskForm.ai_prompt" type="textarea" :rows="8"
+                        :placeholder="'留空使用全局默认提示词（可在系统设置中修改）。默认提示词如下：\n\n' + (settingsLoaded ? defaultPromptPreview : '')"></el-input>
+            </el-form-item>
+            <el-form-item label="每次抓取条数">
+              <el-input-number v-model="taskForm.fetch_count" :min="1" :max="20"></el-input-number>
+              <span class="muted" style="margin-left:8px">每轮每个窗口最多处理的视频数量</span>
+            </el-form-item>
+          </el-form>
+        </div>
+
+        <!-- 步骤3: 发布平台 -->
+        <div v-show="step===2">
+          <div class="plat-grid">
+            <div v-for="p in platformList" :key="p.v" class="plat-card"
+                 :class="{sel: taskForm.platform===p.v, dis:!p.ready}"
+                 @click="p.ready && (taskForm.platform=p.v)">
+              <div class="pl-name">{{ p.label }}</div>
+              <div class="pl-sub">{{ p.ready ? (taskForm.platform===p.v ? '✓ 已选择' : '点击选择') : '即将支持' }}</div>
+            </div>
+          </div>
+          <div class="muted" style="margin-top:10px">
+            各平台账号需提前在比特浏览器对应窗口中登录好；抖音将自动进入创作中心完成上传与发布。
+          </div>
+        </div>
+
+        <!-- 步骤4: 目标与计划 -->
+        <div v-show="step===3">
+          <el-form :model="taskForm" label-width="130px">
+            <el-form-item label="目标分组">
+              <el-select v-model="taskForm.target_group_ids" multiple style="width:100%" placeholder="可选：筛选下方候选窗口"
+                         @change="onTaskGroupsChange">
+                <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id"></el-option>
+              </el-select>
+              <div class="muted">选分组后，下方「目标窗口」仅显示组内窗口；不选则显示全部窗口</div>
+            </el-form-item>
+            <el-form-item label="目标窗口">
+              <el-select v-model="taskForm.target_window_ids" multiple style="width:100%" filterable placeholder="勾选要发布的窗口（需在窗口管理中开启）">
+                <el-option v-for="w in taskWindowOptions" :key="w.id" :label="w.seq + ' - ' + w.name" :value="w.id"></el-option>
+              </el-select>
+            </el-form-item>
+            <template v-if="taskForm.source_type==='doubao_page' && taskTargets.length">
+              <el-divider content-position="left">各窗口聊天页链接（必填）</el-divider>
+              <el-form-item v-for="tw in taskTargets" :key="tw.id" :label="tw.seq + ' - ' + tw.name" label-width="170px" required>
+                <el-input :model-value="(taskForm.window_vars[tw.id] && taskForm.window_vars[tw.id].source_url) || ''"
+                          placeholder="必填：该窗口专属的豆包聊天页链接，如 https://www.doubao.com/chat/xxxx"
+                          @update:model-value="v => setWinVar(tw.id, v)"></el-input>
+              </el-form-item>
+            </template>
+            <el-row :gutter="12">
+              <el-col :span="12"><el-form-item label="单窗口日上限">
+                <el-input-number v-model="taskForm.daily_limit_per_window" :min="0" :max="50" style="width:100%"></el-input-number>
+                <div class="muted">0 表示不限制</div></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="执行周期 cron">
+                <el-select v-model="taskForm.cron" filterable allow-create default-first-option style="width:100%">
+                  <el-option v-for="c in cronPresets" :key="c.v" :label="c.l + ' (' + c.v + ')'" :value="c.v"></el-option>
+                </el-select></el-form-item></el-col>
+            </el-row>
+            <el-row :gutter="12">
+              <el-col :span="12"><el-form-item label="发布后关窗">
+                <el-select v-model="taskForm.close_after_publish" style="width:100%">
+                  <el-option label="跟随全局设置" :value="null"></el-option>
+                  <el-option label="是" :value="true"></el-option>
+                  <el-option label="否" :value="false"></el-option>
+                </el-select></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="是否启用">
+                <el-switch v-model="taskForm.enabled"></el-switch></el-form-item></el-col>
+            </el-row>
+          </el-form>
+        </div>
+
         <template #footer>
+          <el-button v-if="step>0" @click="prevStep">上一步</el-button>
+          <el-button v-if="step<3" type="primary" @click="nextStep">下一步</el-button>
+          <el-button v-if="step===3" type="primary" @click="saveTask">保存任务</el-button>
           <el-button @click="taskVisible=false">取消</el-button>
-          <el-button type="primary" @click="saveTask">保存</el-button>
         </template>
       </el-dialog>
     </el-tab-pane>
@@ -320,6 +374,11 @@
           <el-form-item label="视频下载目录">
             <el-input v-model="form.download_dir"></el-input>
           </el-form-item>
+          <el-divider content-position="left">AI 内容整理</el-divider>
+          <el-form-item label="默认处理提示词">
+            <el-input v-model="form.default_ai_prompt" type="textarea" :rows="8"></el-input>
+            <div class="muted">任务未填写提示词时使用此默认提示词；模型将按其要求输出标题/描述/标签等结构化内容</div>
+          </el-form-item>
           <el-collapse style="margin-top:8px">
             <el-collapse-item title="高级：页面元素选择器（页面改版时调整）" name="adv">
               <el-form-item label="视频文件输入框">
@@ -338,6 +397,64 @@
           </el-form-item>
         </el-form>
       </el-card>
+    </el-tab-pane>
+
+    <!-- ================= AI 模型 ================= -->
+    <el-tab-pane label="AI 模型" name="ai">
+      <div class="toolbar">
+        <el-button type="primary" @click="newModel">+ 添加自定义模型</el-button>
+        <span class="muted">API Key 仅保存在服务端，页面不回显明文；支持 OpenAI 兼容接口</span>
+      </div>
+      <el-table :data="models" border stripe>
+        <el-table-column prop="name" label="名称" width="150" show-overflow-tooltip></el-table-column>
+        <el-table-column prop="api_base" label="接口地址" min-width="220" show-overflow-tooltip></el-table-column>
+        <el-table-column prop="model" label="模型标识" min-width="140" show-overflow-tooltip></el-table-column>
+        <el-table-column label="API Key" width="100">
+          <template #default="{row}">
+            <el-tag size="small" :type="row.has_key ? 'success' : 'info'">{{ row.has_key ? '已配置' : '未配置' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="启用" width="70">
+          <template #default="{row}">
+            <el-switch v-model="row.enabled" @change="v=>toggleModel(row,v)"></el-switch>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="200" fixed="right">
+          <template #default="{row}">
+            <el-button link type="success" size="small" :loading="testing===row.id" @click="testModel(row)">测试</el-button>
+            <el-button link type="primary" size="small" @click="editModel(row)">编辑</el-button>
+            <el-popconfirm title="确定删除该模型？" @confirm="delModel(row)">
+              <template #reference><el-button link type="danger" size="small">删除</el-button></template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-dialog v-model="modelVisible" :title="modelEditing ? '编辑模型' : '添加自定义模型'" width="560">
+        <el-form label-width="110px">
+          <el-form-item label="名称" required>
+            <el-input v-model="modelForm.name" placeholder="例如：DeepSeek / 我的自建模型"></el-input>
+          </el-form-item>
+          <el-form-item label="接口地址" required>
+            <el-input v-model="modelForm.api_base" placeholder="例如 https://api.deepseek.com/v1（OpenAI兼容，不含/chat/completions）"></el-input>
+          </el-form-item>
+          <el-form-item label="模型名称" required>
+            <el-input v-model="modelForm.model" placeholder="例如 deepseek-chat / glm-4-plus / qwen-plus"></el-input>
+          </el-form-item>
+          <el-form-item label="API Key">
+            <el-input v-model="modelForm.api_key" type="password" show-password autocomplete="new-password"
+                      :placeholder="modelEditing && modelEditing.has_key ? '已配置（输入新值可覆盖，留空保持不变）' : '请输入 API Key'"></el-input>
+            <div class="muted">Key 保存在服务器端 data 目录，页面仅显示是否已配置</div>
+          </el-form-item>
+          <el-form-item label="启用">
+            <el-switch v-model="modelForm.enabled"></el-switch>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="modelVisible=false">取消</el-button>
+          <el-button type="primary" @click="saveModel">保存</el-button>
+        </template>
+      </el-dialog>
     </el-tab-pane>
 
     <!-- ================= 运行日志 ================= -->
@@ -502,14 +619,73 @@ const app = createApp({
 
     const taskVisible = ref(false);
     const taskForm = reactive({});
+    const step = ref(0);
+    const platformList = [
+      { v:'douyin', label:'抖音', ready:true },
+      { v:'xhs', label:'小红书', ready:false },
+      { v:'bilibili', label:'B站', ready:false },
+      { v:'kuaishou', label:'快手', ready:false },
+      { v:'weibo', label:'微博', ready:false },
+    ];
+    const platformLabel = p => (platformList.find(x=>x.v===p) || {}).label || p;
     const blankTask = () => ({
       id:'', name:'', platform:'douyin', enabled:true, cron:'0 9 * * *',
-      source_type:'json', source_url:'', source_window_id:'', source_wait:15,
+      source_type:'doubao_page', source_url:'', source_window_id:'', source_wait:15,
       items_path:'data', field_title:'title', field_video:'video_url',
-      fetch_count:1, captions_url:'', caption_template:'{title}', tags:[],
+      fetch_count:1, ai_model_id:'', ai_prompt:'',
       target_group_ids:[], target_window_ids:[], window_vars:{},
       daily_limit_per_window:1, close_after_publish:null
     });
+    // ------- AI 模型 -------
+    const models = ref([]);
+    const modelVisible = ref(false);
+    const modelEditing = ref(null);
+    const testing = ref('');
+    const modelForm = reactive({ name:'', api_base:'', model:'', api_key:'', enabled:true });
+    async function loadModels(){ try { models.value = (await api('/api/models')).models; } catch(e){} }
+    function newModel(){
+      modelEditing.value = null;
+      Object.assign(modelForm, { name:'', api_base:'', model:'', api_key:'', enabled:true });
+      modelVisible.value = true;
+    }
+    function editModel(m){
+      modelEditing.value = m;
+      Object.assign(modelForm, { name:m.name, api_base:m.api_base, model:m.model, api_key:'', enabled:!!m.enabled });
+      modelVisible.value = true;
+    }
+    async function saveModel(){
+      if(!modelForm.name.trim() || !modelForm.api_base.trim() || !modelForm.model.trim()){
+        ElementPlus.ElMessage.warning('请完整填写名称 / 接口地址 / 模型名称'); return;
+      }
+      const body = { name:modelForm.name.trim(), api_base:modelForm.api_base.trim(), model:modelForm.model.trim(), enabled:modelForm.enabled };
+      if(modelForm.api_key.trim()) body.api_key = modelForm.api_key.trim();
+      try {
+        if(modelEditing.value) await api(`/api/models/${modelEditing.value.id}`, { method:'PUT', body:JSON.stringify(body) });
+        else await api('/api/models', { method:'POST', body:JSON.stringify(body) });
+        modelVisible.value = false;
+        await loadModels();
+        ElementPlus.ElMessage.success('模型已保存');
+      } catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
+    }
+    async function delModel(m){
+      try { await api(`/api/models/${m.id}`, { method:'DELETE' }); loadModels(); ElementPlus.ElMessage.success('已删除'); }
+      catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
+    }
+    async function toggleModel(m, v){
+      try { await api(`/api/models/${m.id}`, { method:'PUT', body:JSON.stringify({enabled:v}) }); }
+      catch(e) { m.enabled = !v; ElementPlus.ElMessage.error(String(e.message||e)); }
+    }
+    async function testModel(m){
+      if(!m.has_key){ ElementPlus.ElMessage.warning('请先编辑并保存该模型的 API Key'); return; }
+      testing.value = m.id;
+      try {
+        const j = await api(`/api/models/${m.id}/test`, { method:'POST', body:'{}' });
+        ElementPlus.ElMessage.success(`联通正常：${j.reply || 'ok'}`);
+      } catch(e) { ElementPlus.ElMessage.error('联通失败：' + String(e.message||e)); }
+      finally { testing.value = ''; }
+    }
+    const modelName = id => (models.value.find(m=>m.id===id) || {}).name || '未选择';
+    const defaultPromptPreview = computed(() => (form.default_ai_prompt || '').slice(0, 300));
     // 任务弹窗中豆包模式的实际生效目标(仅显式勾选的窗口)
     const taskTargets = computed(() => {
       const ids = new Set(taskForm.target_window_ids || []);
@@ -533,24 +709,36 @@ const app = createApp({
       if (!cur.source_url && !cur.remark) delete taskForm.window_vars[id];
       else taskForm.window_vars[id] = cur;
     }
-    function newTask(){ Object.assign(taskForm, blankTask()); taskVisible.value = true; }
+    function newTask(){ Object.assign(taskForm, blankTask()); step.value = 0; taskVisible.value = true; loadModels(); }
     function editTask(row){
       Object.assign(taskForm, blankTask(), JSON.parse(JSON.stringify(row)));
       if (!taskForm.window_vars) taskForm.window_vars = {};
+      step.value = 0;
       taskVisible.value = true;
+      loadModels();
     }
+    function validateStep(s){
+      if(s===0){
+        if(!taskForm.name){ ElementPlus.ElMessage.warning('请填写任务名称'); return false; }
+        if(taskForm.source_type!=='doubao_page' && !taskForm.source_url){ ElementPlus.ElMessage.warning('请填写视频源URL'); return false; }
+      }
+      if(s===1 && !taskForm.ai_model_id){
+        ElementPlus.ElMessage.warning('请选择推理模型（可在【AI 模型】页配置 Key 后使用）'); return false;
+      }
+      return true;
+    }
+    function nextStep(){ if(validateStep(step.value)) step.value = Math.min(3, step.value + 1); }
+    function prevStep(){ step.value = Math.max(0, step.value - 1); }
 
     async function saveTask() {
-      if (!taskForm.name) { ElementPlus.ElMessage.warning('请填写任务名称'); return; }
+      for(let s=0;s<3;s++){ if(!validateStep(s)) return; }
       if (taskForm.source_type === 'doubao_page') {
         const missing = taskTargets.value.filter(tw => !(taskForm.window_vars[tw.id] && taskForm.window_vars[tw.id].source_url));
-        if (!taskTargets.value.length) { ElementPlus.ElMessage.warning('请先选择目标分组或窗口'); return; }
+        if (!taskTargets.value.length) { ElementPlus.ElMessage.warning('请先选择目标窗口'); return; }
         if (missing.length) {
           ElementPlus.ElMessage.warning(`还有 ${missing.length} 个目标窗口未填聊天页链接：${missing.slice(0,3).map(w=>w.name).join('、')}${missing.length>3?' 等':''}`);
           return;
         }
-      } else if (!taskForm.source_url) {
-        ElementPlus.ElMessage.warning('请填写视频源URL'); return;
       }
       try {
         if (taskForm.id) {
@@ -613,8 +801,9 @@ const app = createApp({
 
     // ------- lifecycle -------
     function onTab(name) {
-      if (name === 'tasks') loadTasks();
+      if (name === 'tasks') { loadTasks(); }
       if (name === 'settings') loadSettings();
+      if (name === 'ai') { loadModels(); }
       if (name === 'windows' && !windows.value.length) syncAll();
     }
 
@@ -634,6 +823,9 @@ const app = createApp({
       openWin, closeWin, cfgVisible, cfgRow, cfgForm, editCfg, saveCfg, toggleCfg,
       batchVisible, batchForm, applyBatch, tmap, taskName,
       taskVisible, taskForm, newTask, editTask, saveTask, delTask, toggleTask, runTask, taskTargets, taskWindowOptions, onTaskGroupsChange, setWinVar,
+      step, nextStep, prevStep, platformList, platformLabel,
+      models, modelVisible, modelEditing, testing, modelForm, newModel, editModel, saveModel, delModel, toggleModel, testModel, modelName,
+      defaultPromptPreview, loadModels,
       loadTasks, loadSettings, saveSettings, pollLogs, clearLogView, onTab,
     };
   }

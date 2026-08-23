@@ -1,10 +1,12 @@
-"""基于 JSON 文件的持久化存储: 设置 / 任务 / 窗口配置 / 运行状态"""
+"""基于 JSON 文件的持久化存储: 设置 / 任务 / 窗口配置 / AI模型 / 运行状态"""
 import copy
 import json
 import os
 import threading
 import uuid
 from pathlib import Path
+
+from .llm import DEFAULT_PROMPT
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -32,6 +34,7 @@ DEFAULT_SETTINGS = {
     "upload_url": "https://creator.douyin.com/creator-micro/content/upload",
     "publish_timeout": 180,
     "close_window_after_publish": True,
+    "default_ai_prompt": DEFAULT_PROMPT,
     "selectors": {
         "file_input": "input[type=file]",
         "editor": "div[contenteditable=true]",
@@ -106,9 +109,8 @@ TASK_DEFAULTS = {
     "field_title": "title",
     "field_video": "video_url",
     "fetch_count": 1,
-    "captions_url": "",
-    "caption_template": "{title}",
-    "tags": [],
+    "ai_model_id": "",
+    "ai_prompt": "",
     "target_group_ids": [],
     "target_window_ids": [],
     "window_vars": {},
@@ -157,6 +159,77 @@ def update_task(tid, patch):
 def delete_task(tid):
     tasks = [t for t in list_tasks() if t.get("id") != tid]
     save_tasks(tasks)
+    return True
+
+
+# ---------------- AI 模型 ----------------
+
+MODEL_PRESETS = [
+    {"id": "deepseek", "name": "DeepSeek", "provider": "deepseek",
+     "api_base": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
+    {"id": "hunyuan", "name": "腾讯混元(HY)", "provider": "hunyuan",
+     "api_base": "https://api.hunyuan.cloud.tencent.com/v1", "model": "hunyuan-turbos-latest"},
+    {"id": "glm", "name": "智谱 GLM", "provider": "zhipu",
+     "api_base": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-plus"},
+    {"id": "kimi", "name": "Kimi(Moonshot)", "provider": "moonshot",
+     "api_base": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k"},
+    {"id": "minimax", "name": "MiniMax", "provider": "minimax",
+     "api_base": "https://api.minimax.chat/v1", "model": "abab6.5s-chat"},
+    {"id": "qwen", "name": "通义千问 Qwen", "provider": "dashscope",
+     "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
+]
+
+
+def list_models():
+    """AI模型配置列表; 首次访问时种入内置预置(仅名称/接口地址, Key留待用户填写)"""
+    ms = _read("ai_models.json", [])
+    if not ms:
+        ms = [dict(m, api_key="", enabled=True, builtin=True) for m in MODEL_PRESETS]
+        _write("ai_models.json", ms)
+    return ms
+
+
+def save_models(ms):
+    _write("ai_models.json", ms)
+
+
+def get_model(mid):
+    for m in list_models():
+        if m.get("id") == mid:
+            return copy.deepcopy(m)
+    return None
+
+
+def upsert_model(patch):
+    ms = list_models()
+    mid = patch.get("id") or ""
+    for i, m in enumerate(ms):
+        if m.get("id") == mid:
+            ms[i].update({k: v for k, v in patch.items() if k != "id"})
+            save_models(ms)
+            return copy.deepcopy(ms[i])
+    m = {k: v for k, v in MODEL_DEFAULTS.items()}
+    m.update(patch or {})
+    m["id"] = patch.get("id") or new_id()
+    m["builtin"] = False
+    ms.append(m)
+    save_models(ms)
+    return copy.deepcopy(m)
+
+
+MODEL_DEFAULTS = {
+    "name": "",
+    "provider": "custom",
+    "api_base": "",
+    "model": "",
+    "api_key": "",
+    "enabled": True,
+}
+
+
+def delete_model(mid):
+    ms = [m for m in list_models() if m.get("id") != mid]
+    save_models(ms)
     return True
 
 
