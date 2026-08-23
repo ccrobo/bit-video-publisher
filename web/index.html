@@ -222,21 +222,14 @@
         <!-- 步骤1: 任务类型 + 内容源/提问设置 -->
         <div v-show="step===0">
           <el-form :model="taskForm" label-width="130px">
-            <el-form-item label="任务类型" required>
-              <div class="plat-grid">
-                <div class="plat-card" :class="{sel: taskForm.task_type==='video_publish'}" @click="taskForm.task_type='video_publish'">
-                  <div class="pl-name">视频发布</div>
-                  <div class="pl-sub">抓取视频 → AI整理 → 发布到内容平台</div>
-                </div>
-                <div class="plat-card" :class="{sel: taskForm.task_type==='ai_ask'}" @click="switchTaskType('ai_ask')">
-                  <div class="pl-name">AI 提问</div>
-                  <div class="pl-sub">打开各窗口对话框自动发送提示词提问</div>
-                </div>
-              </div>
-            </el-form-item>
-            <el-form-item label="任务名称" required>
-              <el-input v-model="taskForm.name" placeholder="例如：豆包每日视频发布"></el-input>
-            </el-form-item>
+            <el-row :gutter="12">
+              <el-col :span="12"><el-form-item label="任务类型" required>
+                <el-select v-model="taskForm.task_type" style="width:100%" @change="switchTaskType">
+                  <el-option v-for="t in taskTypeList" :key="t.v" :label="t.label" :value="t.v"></el-option>
+                </el-select></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="任务名称" required>
+                <el-input v-model="taskForm.name" placeholder="例如：豆包每日视频发布"></el-input></el-form-item></el-col>
+            </el-row>
 
             <!-- AI 提问设置 -->
             <template v-if="taskForm.task_type==='ai_ask'">
@@ -702,6 +695,10 @@ const app = createApp({
       { v:'keling', label:'可灵', ready:false },
       { v:'jimeng', label:'即梦', ready:false },
     ];
+    const taskTypeList = [
+      { v:'ai_ask', label:'AI 提问（到对话框自动发送提示词）' },
+      { v:'video_publish', label:'视频发布（抓取→AI整理→发布平台）' },
+    ];
     // 向导步骤与索引随任务类型变化:
     // 视频发布 = 内容源/提问设置(0) -> AI整理(1) -> 发布平台(2) -> 目标与计划(3)
     // AI 提问  = 类型与提示词(0) -> 目标与计划(1)
@@ -908,7 +905,7 @@ const app = createApp({
       batchVisible, batchForm, applyBatch, tmap, taskName,
       taskVisible, taskForm, newTask, editTask, saveTask, delTask, toggleTask, runTask, taskTargets, taskWindowOptions, onTaskGroupsChange, setWinVar,
       step, nextStep, prevStep, platformList, platformLabel,
-      isAsk, wizardSteps, lastStep, isTargetStep, winUrlLabel, askPlatformList, switchTaskType,
+      isAsk, wizardSteps, lastStep, isTargetStep, winUrlLabel, askPlatformList, taskTypeList, switchTaskType,
       models, modelVisible, modelEditing, testing, modelForm, newModel, editModel, saveModel, delModel, toggleModel, testModel, modelName,
       defaultPromptPreview, loadModels,
       loadTasks, loadSettings, saveSettings, pollLogs, clearLogView, onTab,
