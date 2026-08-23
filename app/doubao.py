@@ -167,15 +167,19 @@ def _looks_media(url):
     return any(h in low for h in _MEDIA_HINTS)
 
 
+def _media_key(url):
+    """同一视频不同CDN边缘节点的归并key: 路径尾两段"""
+    try:
+        path = url.split("?")[0]
+        return "/".join(path.split("/")[-2:])
+    except Exception:
+        return url
+
+
 def _dedupe_media(urls):
-    """不同CDN边缘节点的同一视频按路径尾段去重; 优先保留 douyinvod 官方域名"""
     out, keys = [], {}
     for u in urls:
-        try:
-            path = u.split("?")[0]
-            k = "/".join(path.split("/")[-2:])
-        except Exception:
-            k = u
+        k = _media_key(u)
         if k in keys:
             old = keys[k]
             if "douyinvod.com" in u and "douyinvod.com" not in old:
@@ -185,11 +189,6 @@ def _dedupe_media(urls):
         keys[k] = u
         out.append(u)
     return out
-
-
-def _filter_video_urls(urls):
-    """只保留直链媒体地址; 不合格的一律丢弃, 绝不回退到原始列表"""
-    return _dedupe_media([u for u in urls if _looks_media(u)])
 
 
 _PROMPT_WORDS = (
@@ -340,11 +339,21 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                     dom_urls.extend(p.evaluate(_VIDEO_JS) or [])
                 except Exception:
                     continue
-            merged = []
+            # 以DOM文档顺序为权威排序(聊天页上旧下新); 网络捕获仅补充DOM中没有的,
+            # 同一视频的多CDN副本按key归并(优先douyinvod官方域名), 避免打乱时间顺序
+            merged, key_pos = [], {}
             for u in list(dom_urls) + net_urls:
-                if u and u not in merged:
-                    merged.append(u)
-            videos = _filter_video_urls(merged)
+                if not u or not u.startswith("http"):
+                    continue
+                k = _media_key(u)
+                if k in key_pos:
+                    old = merged[key_pos[k]]
+                    if "douyinvod.com" in u and "douyinvod.com" not in old:
+                        merged[key_pos[k]] = u
+                    continue
+                key_pos[k] = len(merged)
+                merged.append(u)
+            videos = [u for u in merged if _looks_media(u)]
             if videos:
                 break
             # 逐屏向上滚动, 让虚拟列表挂载历史视频消息
@@ -372,9 +381,13 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
         text = page.evaluate(_TEXT_JS)
         captions = _parse_captions(text)
 
-        # 聊天记录越靠下越新，反转使最新在前
+        # 聊天页文档序上旧下新, 反转使最新在前; 注入/发布永远从列表头部取(即最下方最新的视频)
         videos = list(reversed(videos))
-        add_log(f"豆包页面抓取完成: 视频 {len(videos)} 个, 候选文案 {len(captions)} 条 (尝试{attempt}轮)")
+        latest = videos[0] if videos else ""
+        add_log(
+            f"豆包页面抓取完成: 视频 {len(videos)} 个, 候选文案 {len(captions)} 条 (尝试{attempt}轮)"
+            + (f"; 最新视频: {latest[:80]}" if latest else "")
+        )
         if not videos:
             raise DoubaoScrapeError(
                 "未能从页面提取到视频链接。请确认该聊天已生成视频、抓取窗口已登录豆包，"
