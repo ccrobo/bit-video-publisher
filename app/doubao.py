@@ -284,9 +284,9 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
     try:
         add_log(f"[{window['name']}] 正在打开豆包聊天页抓取: {source_url}")
         pw = sync_playwright().start()
-        browser = pw.chromium.connect_over_cdp(cdp)
+        browser = pw.chromium.connect_over_cdp(cdp, timeout=30000)
         ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-        page = ctx.new_page()
+        page = ctx.new_page(timeout=30000)
 
         # 监听整个上下文的所有响应(含点击封面后新开的播放标签页)
         net_urls = []
@@ -327,18 +327,18 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
 
         wait_s = max(10, int(wait_seconds or 15))
         deadline = time.time() + wait_s + 30
+        add_log(f"[{window['name']}] 聊天页已打开，开始检测视频链接（最多 {wait_s + 30} 秒）...")
         videos = []
         attempt = 0
         clicked = False
         downloaded = False
         while time.time() < deadline:
             attempt += 1
-            dom_urls = []
-            for p in list(ctx.pages):
-                try:
-                    dom_urls.extend(p.evaluate(_VIDEO_JS) or [])
-                except Exception:
-                    continue
+            # 只采集自己打开的聊天页DOM: 遍历全部标签页时, 残留页面的evaluate可能无超时挂起
+            try:
+                dom_urls = page.evaluate(_VIDEO_JS) or []
+            except Exception:
+                dom_urls = []
             # 以DOM文档顺序为权威排序(聊天页上旧下新); 网络捕获仅补充DOM中没有的,
             # 同一视频的多CDN副本按key归并(优先douyinvod官方域名), 避免打乱时间顺序
             merged, key_pos = [], {}
@@ -378,7 +378,10 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                     continue
             time.sleep(3)
 
-        text = page.evaluate(_TEXT_JS)
+        try:
+            text = page.evaluate(_TEXT_JS) or ""
+        except Exception:
+            text = ""
         captions = _parse_captions(text)
 
         # 聊天页文档序上旧下新, 反转使最新在前; 注入/发布永远从列表头部取(即最下方最新的视频)
@@ -397,7 +400,7 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
     finally:
         if page is not None:
             try:
-                page.close()
+                page.close(timeout=5000)
             except Exception:
                 pass
         # 清理残留标签页: 之前发布留下的创作中心页 / 重复打开的同一聊天页
@@ -406,10 +409,15 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
             for p in list(ctx.pages):
                 u = (p.url or "")
                 if "creator.douyin.com" in u or (src and u.rstrip("/") == src):
-                    p.close()
+                    p.close(timeout=5000)
         except Exception:
             pass
         if pw is not None:
+            # 先断开CDP连接再停playwright, 避免stop()在连接未释放时挂起
+            try:
+                browser.close()
+            except Exception:
+                pass
             try:
                 pw.stop()
             except Exception:
