@@ -145,6 +145,33 @@ def _hover_click_cover(page):
         return False
 
 
+def _click_latest_player(page):
+    """用Playwright定位引擎(穿透Shadow DOM)点击最后一个xgplayer的中央播放键, 触发视频加载"""
+    try:
+        players = page.locator(".xgplayer")
+        n = players.count()
+        if not n:
+            return False
+        p = players.nth(n - 1)
+        start = p.locator(".xgplayer-start")
+        target = start.first if start.count() else p
+        try:
+            target.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        try:
+            target.click(timeout=3000, position={"x": 20, "y": 20} if start.count() == 0 else None)
+        except Exception:
+            # xgplayer-start可能被海报层遮挡: 直接点播放器中心
+            box = p.bounding_box()
+            if not box:
+                return False
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        return True
+    except Exception:
+        return False
+
+
 def _click_download_btn(page):
     """点击卡片上的下载按钮, 迫使浏览器发起真实视频请求"""
     pos = None
@@ -354,11 +381,33 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
         downloaded = False
         while time.time() < deadline:
             attempt += 1
-            # 只采集自己打开的聊天页DOM: 遍历全部标签页时, 残留页面的evaluate可能无超时挂起
+            # 采集视频直链。必须用 Playwright 选择器引擎(eval_on_selector_all/locator):
+            # 豆包把xgplayer渲染在Shadow DOM里, page.evaluate的原生querySelectorAll
+            # 不穿透ShadowRoot, 会误判"没有视频"而错误地去向上滚动
+            dom_urls = []
             try:
-                dom_urls = page.evaluate(_VIDEO_JS) or []
+                dom_urls = page.eval_on_selector_all(
+                    "video",
+                    """els => els.map(v => {
+                      let u = (v.currentSrc || v.src || '');
+                      if (!u.startsWith('http')) {
+                        for (const s of (v.querySelectorAll('source') || [])) {
+                          const su = s.getAttribute('src') || '';
+                          if (su.startsWith('http')) { u = su; break; }
+                        }
+                      }
+                      return u;
+                    })""",
+                ) or []
             except Exception:
-                dom_urls = []
+                pass
+            try:
+                extra = page.evaluate(_VIDEO_JS) or []
+                for u in reversed(extra):
+                    if u not in dom_urls:
+                        dom_urls.insert(0, u)
+            except Exception:
+                pass
             # 以DOM文档顺序为权威排序(聊天页上旧下新); 网络捕获仅补充DOM中没有的,
             # 同一视频的多CDN副本按key归并(优先douyinvod官方域名), 避免打乱时间顺序
             merged, key_pos = [], {}
@@ -377,30 +426,29 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
             if videos:
                 break
 
-            # 区分两种情况:
+            # 区分两种情况: locator.count() 穿透Shadow DOM, 与肉眼所见一致
             has_video_el = False
             try:
-                has_video_el = page.evaluate("() => document.querySelectorAll('video').length > 0")
+                has_video_el = page.locator("video").count() > 0
             except Exception:
                 pass
 
             if has_video_el:
-                # 以封面卡片为锚点抓取: 打开即在底部, 最下方的封面就是最新视频。
-                # 豆包初始只渲染封面+blob占位, 主动点击封面让播放器加载, 直链会随即被网络捕获。
+                # 以播放器为锚点抓取: 打开即在底部, 最下方的播放器就是最新视频。
+                # 若直链已挂在<source>上第一轮就拿到了; 走到这里说明还没挂,
+                # 点击中央播放键触发加载, 直链会随即被网络捕获。
                 # 绝不向上滚动——滚动会把最新卡片滚出虚拟列表视口。
                 if not clicked:
-                    if _hover_click_cover(page):
+                    if _click_latest_player(page):
                         clicked = True
-                        add_log("已点击最新视频封面，等待直链出现...")
+                        add_log("已点击最新视频播放器，等待直链出现...")
                     else:
                         time.sleep(1.5)
-                # 点击后/自动播放中, 事件驱动等直链出现(≤6秒); source标签的src也算
+                # 点击后/自动播放中, 等直链挂到DOM(≤6秒); wait_for_selector穿透Shadow DOM
                 try:
-                    page.wait_for_function(
-                        r"""() => [...document.querySelectorAll('video')].some(v =>
-(v.currentSrc || v.src || '').startsWith('http')
-|| [...(v.querySelectorAll('source') || [])].some(s => (s.getAttribute('src') || '').startsWith('http')))
- || performance.getEntriesByType('resource').some(e => /douyinvod|\.mp4|\/video\/tos\//.test(e.name))""",
+                    page.wait_for_selector(
+                        'video[src^="http"], video source[src^="http"]',
+                        state="attached",
                         timeout=6000,
                     )
                     continue  # 直链已出现, 回到循环顶部重新收集
