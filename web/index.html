@@ -525,12 +525,13 @@ const app = createApp({
       return j;
     }
 
+    let autoSynced = false;
     async function refreshStatus() {
       try {
-        const prev = !!status.value.bit_running;
         status.value = await api('/api/status');
-        // 比特浏览器运行中时自动同步窗口: 首次/由离线变在线立即同步, 之后每60秒静默刷新一次
-        if (status.value.bit_running && (!prev || Date.now() - lastSyncTs > 60000) && !document.hidden) {
+        // 仅页面初始化时若比特浏览器已运行则自动同步一次, 之后需手动同步
+        if (!autoSynced && status.value.bit_running) {
+          autoSynced = true;
           await syncAll(true);
         }
       } catch(e) {}
@@ -544,14 +545,12 @@ const app = createApp({
       } catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
     }
 
-    let lastSyncTs = 0;
     async function syncAll(silent) {
       syncing.value = true;
       try {
         const j = await api('/api/bit/sync', { method:'POST', body:'{}' });
         groups.value = j.groups; windows.value = j.windows;
         pageNo.value = 1;
-        lastSyncTs = Date.now();
         if (!silent) ElementPlus.ElMessage.success(`同步完成：${j.groups.length} 个分组 / ${j.windows.length} 个窗口`);
       } catch(e) {
         if (!silent) ElementPlus.ElMessage.error(String(e.message||e));
