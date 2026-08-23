@@ -50,18 +50,20 @@ _SCROLL_UP_JS = """
 
 _FIND_COVER_JS = """
 () => {
-  let img = [...document.querySelectorAll('img')].find(im => {
+  // 取文档序最后一个匹配(聊天页上旧下新, 最下方的封面即最新视频)
+  let imgs = [...document.querySelectorAll('img')].filter(im => {
     const r = im.getBoundingClientRect();
     const cls = (im.className || '').toString();
     return cls.includes('cover') && r.width > 120 && r.height > 100;
   });
-  if (!img) {
-    img = [...document.querySelectorAll('[class*=block-video] img')].find(im => {
+  if (!imgs.length) {
+    imgs = [...document.querySelectorAll('[class*=block-video] img')].filter(im => {
       const r = im.getBoundingClientRect();
       return r.width > 120 && r.height > 100;
     });
   }
-  if (!img) return null;
+  if (!imgs.length) return null;
+  const img = imgs[imgs.length - 1];
   const r = img.getBoundingClientRect();
   return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
 }
@@ -85,16 +87,17 @@ _FIND_DOWNLOAD_JS = """
 
 _SCROLL_COVER_INTO_VIEW_JS = """
 () => {
-  let img = [...document.querySelectorAll('img')].find(im => {
+  // 取文档序最后一个匹配(最下方的封面即最新视频), 滚入视口
+  let imgs = [...document.querySelectorAll('img')].filter(im => {
     const cls = (im.className || '').toString();
     return cls.includes('cover') && im.getBoundingClientRect().width > 120;
   });
-  if (!img) {
-    img = [...document.querySelectorAll('[class*=block-video] img')].find(im =>
+  if (!imgs.length) {
+    imgs = [...document.querySelectorAll('[class*=block-video] img')].filter(im =>
       im.getBoundingClientRect().width > 120);
   }
-  if (!img) return false;
-  img.scrollIntoView({ block: 'center', behavior: 'instant' });
+  if (!imgs.length) return false;
+  imgs[imgs.length - 1].scrollIntoView({ block: 'center', behavior: 'instant' });
   return true;
 }
 """
@@ -368,27 +371,27 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                 pass
 
             if has_video_el:
-                # 页面上已有视频卡片(打开即在底部, 这就是最新视频), 只是还没拿到直链
-                # (豆包初始只渲染封面+blob占位, 直链要点开播放才请求)。
+                # 以封面卡片为锚点抓取: 打开即在底部, 最下方的封面就是最新视频。
+                # 豆包初始只渲染封面+blob占位, 主动点击封面让播放器加载, 直链会随即被网络捕获。
                 # 绝不向上滚动——滚动会把最新卡片滚出虚拟列表视口。
+                if not clicked:
+                    if _hover_click_cover(page):
+                        clicked = True
+                        add_log("已点击最新视频封面，等待直链出现...")
+                    else:
+                        time.sleep(1.5)
+                # 点击后/自动播放中, 事件驱动等直链出现(≤6秒)
                 try:
                     page.wait_for_function(
                         r"""() => [...document.querySelectorAll('video')].some(v => (v.currentSrc || v.src || '').startsWith('http'))
  || performance.getEntriesByType('resource').some(e => /douyinvod|\.mp4|\/video\/tos\//.test(e.name))""",
-                        timeout=5000,
+                        timeout=6000,
                     )
                     continue  # 直链已出现, 回到循环顶部重新收集
                 except Exception:
                     pass
-                if not clicked:
-                    # 等不到直链: 悬停+点击封面触发播放, 迫使浏览器请求mp4
-                    if _hover_click_cover(page):
-                        clicked = True
-                        add_log("已点击视频封面卡片，等待播放加载...")
-                        time.sleep(4)
-                        continue
                 if not downloaded:
-                    # 再不行点卡片"下载"按钮, 直接逼出真实下载地址
+                    # 还不行点卡片"下载"按钮, 直接逼出真实下载地址
                     if _click_download_btn(page):
                         downloaded = True
                         add_log("已点击下载按钮获取视频直链...")
