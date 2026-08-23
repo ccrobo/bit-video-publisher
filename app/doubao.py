@@ -48,32 +48,37 @@ _SCROLL_UP_JS = """
 }
 """
 
-_FIND_COVER_JS = """
+# 豆包聊天页上旧下新: 文档序最后一张视频卡片就是最新视频, 打开页面即在视口内。
+# 用稳定类名前缀(block-video/image-box-grid-item)定位, 封面水印图作为兜底特征
+_LATEST_CARD_INFO_JS = """
 () => {
-  // xgplayer(西瓜播放器): 取最后一个播放器, 点中央播放大按钮触发视频加载
-  const players = [...document.querySelectorAll('.xgplayer')];
-  if (players.length) {
-    const p = players[players.length - 1];
-    const t = p.querySelector('.xgplayer-start') || p.querySelector('xg-poster') || p;
-    const r = t.getBoundingClientRect();
-    if (r.width > 60 && r.height > 60) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  let cards = [...document.querySelectorAll('[class*="block-video"],[class*="image-box-grid-item"]')]
+    .filter(el => el.getBoundingClientRect().width > 120);
+  if (!cards.length) {
+    cards = [...document.querySelectorAll('img[src*="video_dsz"], img[src*="tplv-a9rns"]')]
+      .map(im => im.closest('[class*="block-video"]') || im.parentElement)
+      .filter(Boolean);
   }
-  // 兜底: 封面图, 取文档序最后一个(聊天页上旧下新, 最下方的封面即最新视频)
-  let imgs = [...document.querySelectorAll('img')].filter(im => {
-    const r = im.getBoundingClientRect();
-    const cls = (im.className || '').toString();
-    return cls.includes('cover') && r.width > 120 && r.height > 100;
-  });
-  if (!imgs.length) {
-    imgs = [...document.querySelectorAll('[class*=block-video] img')].filter(im => {
-      const r = im.getBoundingClientRect();
-      return r.width > 120 && r.height > 100;
-    });
-  }
-  if (!imgs.length) return null;
-  const img = imgs[imgs.length - 1];
-  const r = img.getBoundingClientRect();
-  return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  if (!cards.length) return null;
+  const el = cards[cards.length - 1];
+  el.scrollIntoView({ block: 'center', behavior: 'instant' });
+  const r = el.getBoundingClientRect();
+  return {
+    x: r.x + r.width / 2,
+    y: Math.max(20, Math.min(r.y + r.height / 2, window.innerHeight - 20)),
+  };
+}
+"""
+
+_LATEST_CARD_SRC_JS = """
+() => {
+  const cards = [...document.querySelectorAll('[class*="block-video"],[class*="image-box-grid-item"]')]
+    .filter(el => el.getBoundingClientRect().width > 120);
+  if (!cards.length) return '';
+  const el = cards[cards.length - 1];
+  const v = el.querySelector('video');
+  const s = v ? (v.currentSrc || v.src || '') : '';
+  return /^https?:\\/\\//.test(s) ? s : '';
 }
 """
 
@@ -93,80 +98,18 @@ _FIND_DOWNLOAD_JS = """
 """
 
 
-_SCROLL_COVER_INTO_VIEW_JS = """
-() => {
-  // xgplayer: 把最后一个播放器(最下方的即最新视频)滚入视口
-  const players = [...document.querySelectorAll('.xgplayer')];
-  if (players.length) {
-    players[players.length - 1].scrollIntoView({ block: 'center', behavior: 'instant' });
-    return true;
-  }
-  // 取文档序最后一个匹配(最下方的封面即最新视频), 滚入视口
-  let imgs = [...document.querySelectorAll('img')].filter(im => {
-    const cls = (im.className || '').toString();
-    return cls.includes('cover') && im.getBoundingClientRect().width > 120;
-  });
-  if (!imgs.length) {
-    imgs = [...document.querySelectorAll('[class*=block-video] img')].filter(im =>
-      im.getBoundingClientRect().width > 120);
-  }
-  if (!imgs.length) return false;
-  imgs[imgs.length - 1].scrollIntoView({ block: 'center', behavior: 'instant' });
-  return true;
-}
-"""
-
-
-def _hover_click_cover(page):
-    """把视频封面滚入视口后悬停并点击, 触发播放器初始化"""
+def _click_latest_card(page):
+    """直接定位文档序最底部的视频卡片(=最新视频, 打开页面即见)并点击触发播放"""
     try:
-        if not page.evaluate(_SCROLL_COVER_INTO_VIEW_JS):
-            return False
-        time.sleep(1.2)
-        pos = page.evaluate(_FIND_COVER_JS)
-        if not pos:
-            return False
-        vh = page.evaluate("() => window.innerHeight") or 900
-        if not (10 < pos["y"] < vh - 10):
-            page.evaluate(
-                "(p) => { const d = document.querySelector('[class*=v_list_scroller], [class*=scroller]');"
-                " if (d) { d.scrollTop += (p.y - window.innerHeight / 2); } }",
-                pos,
-            )
-            time.sleep(1)
-            pos = page.evaluate(_FIND_COVER_JS)
-            if not pos or not (10 < pos["y"] < vh - 10):
-                return False
+        pos = page.evaluate(_LATEST_CARD_INFO_JS)
+    except Exception:
+        return False
+    if not pos:
+        return False
+    try:
         page.mouse.move(pos["x"], pos["y"])
         time.sleep(0.8)
         page.mouse.click(pos["x"], pos["y"])
-        return True
-    except Exception:
-        return False
-
-
-def _click_latest_player(page):
-    """用Playwright定位引擎(穿透Shadow DOM)点击最后一个xgplayer的中央播放键, 触发视频加载"""
-    try:
-        players = page.locator(".xgplayer")
-        n = players.count()
-        if not n:
-            return False
-        p = players.nth(n - 1)
-        start = p.locator(".xgplayer-start")
-        target = start.first if start.count() else p
-        try:
-            target.scroll_into_view_if_needed(timeout=3000)
-        except Exception:
-            pass
-        try:
-            target.click(timeout=3000, position={"x": 20, "y": 20} if start.count() == 0 else None)
-        except Exception:
-            # xgplayer-start可能被海报层遮挡: 直接点播放器中心
-            box = p.bounding_box()
-            if not box:
-                return False
-            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
         return True
     except Exception:
         return False
@@ -354,11 +297,8 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
         cur = page.url or ""
         if "/login" in cur or "passport" in cur:
             raise DoubaoScrapeError(f"窗口[{window['name']}] 未登录豆包，请先在该窗口手动登录 doubao.com")
-
-        # 就绪检测: 豆包有心跳/长连接, networkidle 永远达不到只会白等满超时;
-        # wait_for_selector 为 DOM 事件驱动, 视频或输入框一渲染出来立即返回(最多10秒)
         try:
-            page.wait_for_selector('video, [contenteditable="true"]', timeout=10000)
+            page.wait_for_load_state("networkidle", timeout=30000)
         except Exception:
             pass
 
@@ -377,41 +317,27 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
         add_log(f"[{window['name']}] 聊天页已打开，开始检测视频链接（最多 {wait_s + 30} 秒）...")
         videos = []
         attempt = 0
-        clicked = False
+        clicked_latest = False
         downloaded = False
         while time.time() < deadline:
             attempt += 1
-            # 采集视频直链。必须用 Playwright 选择器引擎(eval_on_selector_all/locator):
-            # 豆包把xgplayer渲染在Shadow DOM里, page.evaluate的原生querySelectorAll
-            # 不穿透ShadowRoot, 会误判"没有视频"而错误地去向上滚动
-            dom_urls = []
+            # 只采集自己打开的聊天页DOM: 遍历全部标签页时, 残留页面的evaluate可能无超时挂起
             try:
-                dom_urls = page.eval_on_selector_all(
-                    "video",
-                    """els => els.map(v => {
-                      let u = (v.currentSrc || v.src || '');
-                      if (!u.startsWith('http')) {
-                        for (const s of (v.querySelectorAll('source') || [])) {
-                          const su = s.getAttribute('src') || '';
-                          if (su.startsWith('http')) { u = su; break; }
-                        }
-                      }
-                      return u;
-                    })""",
-                ) or []
+                dom_urls = page.evaluate(_VIDEO_JS) or []
+            except Exception:
+                dom_urls = []
+            # 最底部最新卡片的<video>直链优先(打开页面即见, 无需滚动加载历史)
+            latest_src = ""
+            try:
+                s = page.evaluate(_LATEST_CARD_SRC_JS)
+                if s and s.startswith("http"):
+                    latest_src = s
             except Exception:
                 pass
-            try:
-                extra = page.evaluate(_VIDEO_JS) or []
-                for u in reversed(extra):
-                    if u not in dom_urls:
-                        dom_urls.insert(0, u)
-            except Exception:
-                pass
-            # 以DOM文档顺序为权威排序(聊天页上旧下新); 网络捕获仅补充DOM中没有的,
+            # 最新直链置顶; DOM文档序(上旧下新)为权威排序, 网络捕获仅补充DOM中没有的,
             # 同一视频的多CDN副本按key归并(优先douyinvod官方域名), 避免打乱时间顺序
             merged, key_pos = [], {}
-            for u in list(dom_urls) + net_urls:
+            for u in ([latest_src] if latest_src else []) + list(dom_urls) + net_urls:
                 if not u or not u.startswith("http"):
                     continue
                 k = _media_key(u)
@@ -425,59 +351,22 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
             videos = [u for u in merged if _looks_media(u)]
             if videos:
                 break
-
-            # 区分两种情况: locator.count() 穿透Shadow DOM, 与肉眼所见一致
-            has_video_el = False
+            # 依次尝试: 点击最底部最新卡片播放 -> 点其"下载"按钮 -> 最后才向上滚挂载历史
+            if not clicked_latest and _click_latest_card(page):
+                clicked_latest = True
+                add_log("已定位页面最底部最新视频卡片并点击播放...")
+                time.sleep(4)
+                continue
+            if clicked_latest and not downloaded and _click_download_btn(page):
+                downloaded = True
+                add_log("已点击下载按钮获取视频直链...")
+                time.sleep(5)
+                continue
             try:
-                has_video_el = page.locator("video").count() > 0
+                page.evaluate(_SCROLL_UP_JS)
             except Exception:
                 pass
-
-            if has_video_el:
-                # 以播放器为锚点抓取: 打开即在底部, 最下方的播放器就是最新视频。
-                # 若直链已挂在<source>上第一轮就拿到了; 走到这里说明还没挂,
-                # 点击中央播放键触发加载, 直链会随即被网络捕获。
-                # 绝不向上滚动——滚动会把最新卡片滚出虚拟列表视口。
-                if not clicked:
-                    if _click_latest_player(page):
-                        clicked = True
-                        add_log("已点击最新视频播放器，等待直链出现...")
-                    else:
-                        time.sleep(1.5)
-                # 点击后/自动播放中, 等直链挂到DOM(≤6秒); wait_for_selector穿透Shadow DOM
-                try:
-                    page.wait_for_selector(
-                        'video[src^="http"], video source[src^="http"]',
-                        state="attached",
-                        timeout=6000,
-                    )
-                    continue  # 直链已出现, 回到循环顶部重新收集
-                except Exception:
-                    pass
-                if not downloaded:
-                    # 还不行点卡片"下载"按钮, 直接逼出真实下载地址
-                    if _click_download_btn(page):
-                        downloaded = True
-                        add_log("已点击下载按钮获取视频直链...")
-                        time.sleep(5)
-                        continue
-                time.sleep(2)
-            else:
-                # 视口内确实没有视频消息: 逐屏向上滚动挂载历史视频
-                moved = False
-                try:
-                    moved = page.evaluate(_SCROLL_UP_JS)
-                except Exception:
-                    pass
-                if not moved and clicked:
-                    # 已滚到顶部且点过封面仍无视频: 尝试点击兜底后结束
-                    if not downloaded and _click_download_btn(page):
-                        downloaded = True
-                        add_log("已点击下载按钮获取视频直链...")
-                        time.sleep(5)
-                        continue
-                    break
-                time.sleep(2)
+            time.sleep(3)
 
         try:
             text = page.evaluate(_TEXT_JS) or ""
@@ -485,8 +374,11 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
             text = ""
         captions = _parse_captions(text)
 
-        # 聊天页文档序上旧下新, 反转使最新在前; 注入/发布永远从列表头部取(即最下方最新的视频)
-        videos = list(reversed(videos))
+        # 最新视频保持在列表头部(最新卡片直链优先, 其余按新->旧); 发布永远取头部
+        if latest_src:
+            videos = [videos[0]] + list(reversed(videos[1:]))
+        else:
+            videos = list(reversed(videos))
         latest = videos[0] if videos else ""
         add_log(
             f"豆包页面抓取完成: 视频 {len(videos)} 个, 候选文案 {len(captions)} 条 (尝试{attempt}轮)"
