@@ -50,7 +50,15 @@ _SCROLL_UP_JS = """
 
 _FIND_COVER_JS = """
 () => {
-  // 取文档序最后一个匹配(聊天页上旧下新, 最下方的封面即最新视频)
+  // xgplayer(西瓜播放器): 取最后一个播放器, 点中央播放大按钮触发视频加载
+  const players = [...document.querySelectorAll('.xgplayer')];
+  if (players.length) {
+    const p = players[players.length - 1];
+    const t = p.querySelector('.xgplayer-start') || p.querySelector('xg-poster') || p;
+    const r = t.getBoundingClientRect();
+    if (r.width > 60 && r.height > 60) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }
+  // 兜底: 封面图, 取文档序最后一个(聊天页上旧下新, 最下方的封面即最新视频)
   let imgs = [...document.querySelectorAll('img')].filter(im => {
     const r = im.getBoundingClientRect();
     const cls = (im.className || '').toString();
@@ -87,6 +95,12 @@ _FIND_DOWNLOAD_JS = """
 
 _SCROLL_COVER_INTO_VIEW_JS = """
 () => {
+  // xgplayer: 把最后一个播放器(最下方的即最新视频)滚入视口
+  const players = [...document.querySelectorAll('.xgplayer')];
+  if (players.length) {
+    players[players.length - 1].scrollIntoView({ block: 'center', behavior: 'instant' });
+    return true;
+  }
   // 取文档序最后一个匹配(最下方的封面即最新视频), 滚入视口
   let imgs = [...document.querySelectorAll('img')].filter(im => {
     const cls = (im.className || '').toString();
@@ -380,10 +394,12 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                         add_log("已点击最新视频封面，等待直链出现...")
                     else:
                         time.sleep(1.5)
-                # 点击后/自动播放中, 事件驱动等直链出现(≤6秒)
+                # 点击后/自动播放中, 事件驱动等直链出现(≤6秒); source标签的src也算
                 try:
                     page.wait_for_function(
-                        r"""() => [...document.querySelectorAll('video')].some(v => (v.currentSrc || v.src || '').startsWith('http'))
+                        r"""() => [...document.querySelectorAll('video')].some(v =>
+(v.currentSrc || v.src || '').startsWith('http')
+|| [...(v.querySelectorAll('source') || [])].some(s => (s.getAttribute('src') || '').startsWith('http')))
  || performance.getEntriesByType('resource').some(e => /douyinvod|\.mp4|\/video\/tos\//.test(e.name))""",
                         timeout=6000,
                     )
