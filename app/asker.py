@@ -94,9 +94,13 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
         except Exception:
             pass
 
-        # 等待输入框出现
+        # 等待输入框出现: DOM事件驱动, 元素一渲染出来立即返回; 之后仅做坐标定位
+        try:
+            page.wait_for_selector('textarea, [contenteditable="true"]', timeout=15000)
+        except Exception:
+            pass
         pos = None
-        deadline = time.time() + 20
+        deadline = time.time() + 3
         while time.time() < deadline:
             try:
                 pos = page.evaluate(_FIND_INPUT_JS)
@@ -104,7 +108,7 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
                 pos = None
             if pos:
                 break
-            time.sleep(1.5)
+            time.sleep(0.4)
         if not pos:
             raise RuntimeError(f"窗口[{window['name']}] 页面未找到聊天输入框，请确认链接是平台对话页")
 

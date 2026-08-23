@@ -311,20 +311,12 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
         if "/login" in cur or "passport" in cur:
             raise DoubaoScrapeError(f"窗口[{window['name']}] 未登录豆包，请先在该窗口手动登录 doubao.com")
 
-        # 就绪快速检测: 豆包有心跳/长连接, networkidle 永远达不到只会白等满超时;
-        # 改为轮询输入框或视频渲染出现, 最多10秒
-        _ready_js = (
-            '() => !!document.querySelector("[contenteditable=\\"true\\"]") '
-            "|| document.querySelectorAll('video').length > 0"
-        )
-        ready_deadline = time.time() + 10
-        while time.time() < ready_deadline:
-            try:
-                if page.evaluate(_ready_js):
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
+        # 就绪检测: 豆包有心跳/长连接, networkidle 永远达不到只会白等满超时;
+        # wait_for_selector 为 DOM 事件驱动, 视频或输入框一渲染出来立即返回(最多10秒)
+        try:
+            page.wait_for_selector('video, [contenteditable="true"]', timeout=10000)
+        except Exception:
+            pass
 
         # 登录态检查(页面内出现扫码/验证码登录说明未登录)
         try:
