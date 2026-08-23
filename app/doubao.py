@@ -31,11 +31,29 @@ _VIDEO_JS = """
 
 _TEXT_JS = "() => document.body.innerText"
 
-# 以最新视频卡片为锚点, 取其所在的整条回复消息(=页面最底部最新回复)的原文作为文案材料。
-# 豆包定时任务输出为结构化标记(【标题】【描述】【解答】等), 原文直接交由AI整理, 不做二次加工
+# 定位页面最底部最新回复的原文作为文案材料(交AI整理, 不做二次加工)。
+# 返回 {how: 策略名, text: 回复原文}, 便于日志诊断
 _LATEST_REPLY_TEXT_JS = """
 () => {
+  const MARK = /【(标题|描述|解答|旁白|问题|生成时间)】/;
   const bodyLen = (document.body.innerText || '').length;
+  const okLen = t => t && t.length > 30 && t.length < Math.max(800, bodyLen * 0.5);
+
+  // 策略A: 含结构化标记的最小消息块, 文档序最后一个=最新回复
+  const cand = [];
+  for (const d of document.querySelectorAll('div')) {
+    const c = (d.className || '').toString();
+    if (!(c.startsWith('container-') || /message|receive|agent/i.test(c))) continue;
+    const t = d.innerText || '';
+    if (MARK.test(t) && t.length < 8000) cand.push({ el: d, t: t.trim() });
+  }
+  const leaves = cand.filter(x => !cand.some(y => y !== x && x.el.contains(y.el)));
+  if (leaves.length) {
+    const last = leaves[leaves.length - 1];
+    if (okLen(last.t)) return { how: 'mark-block(' + leaves.length + ')', text: last.t };
+  }
+
+  // 视频卡片锚点
   let cards = [...document.querySelectorAll('[class*="block-video"],[class*="image-box-grid-item"]')]
     .filter(el => el.getBoundingClientRect().width > 120);
   if (!cards.length) {
@@ -43,27 +61,28 @@ _LATEST_REPLY_TEXT_JS = """
       .map(im => im.closest('[class*="block-video"]') || im.parentElement)
       .filter(Boolean);
   }
-  if (!cards.length) return '';
-  const card = cards[cards.length - 1];
-  const okLen = t => t && t.length > 30 && t.length < Math.max(800, bodyLen * 0.5);
-  // 策略1: 最近的可滚动祖先(虚拟列表容器), 其直接子级即为一条消息(最后一条=最新回复)
-  let sc = card.parentElement;
-  while (sc && sc !== document.body && !(sc.scrollHeight > sc.clientHeight + 100)) {
-    sc = sc.parentElement;
+  const card = cards.length ? cards[cards.length - 1] : null;
+
+  // 策略B: 最近可滚动祖先(虚拟列表容器), 其直接子级=一条消息, 取含视频那条
+  if (card) {
+    let sc = card.parentElement;
+    while (sc && sc !== document.body && !(sc.scrollHeight > sc.clientHeight + 100)) {
+      sc = sc.parentElement;
+    }
+    if (sc && sc !== document.body) {
+      let top = card;
+      while (top.parentElement && top.parentElement !== sc) top = top.parentElement;
+      const t = ((top.innerText) || '').trim();
+      if (okLen(t)) return { how: 'scroller-anchor', text: t.slice(0, 6000) };
+    }
+    // 策略C: 特征类名兜底
+    const msg = card.closest('[class*="message"],[class*="receive"],[class*="agent"],[class*="container-"]');
+    if (msg) {
+      const t = ((msg.innerText) || '').trim();
+      if (okLen(t)) return { how: 'closest', text: t.slice(0, 6000) };
+    }
   }
-  if (sc && sc !== document.body) {
-    let top = card;
-    while (top.parentElement && top.parentElement !== sc) top = top.parentElement;
-    const t = ((top.innerText) || '').trim();
-    if (okLen(t)) return t.slice(0, 6000);
-  }
-  // 策略2: 特征类名兜底(message/receive/agent/container)
-  const msg = card.closest('[class*="message"],[class*="receive"],[class*="agent"],[class*="container-"]');
-  if (msg) {
-    const t = ((msg.innerText) || '').trim();
-    if (okLen(t)) return t.slice(0, 6000);
-  }
-  return '';
+  return { how: 'none', text: '' };
 }
 """
 
@@ -404,21 +423,26 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                 pass
             time.sleep(3)
 
-        # 文案材料优先取"包含最新视频的那条回复"原文(页面最底部), 直接交AI整理;
-        # 定位失败才退化为全页文本解析
-        reply_text = ""
+        # 文案材料优先取"最新回复"原文(页面最底部), 直接交AI整理; 失败才退化全页解析
+        reply_info = {}
         try:
-            reply_text = (page.evaluate(_LATEST_REPLY_TEXT_JS) or "").strip()
+            reply_info = page.evaluate(_LATEST_REPLY_TEXT_JS) or {}
         except Exception:
-            reply_text = ""
+            reply_info = {}
+        reply_text = (reply_info.get("text") or "").strip()
+        how = reply_info.get("how") or "none"
         if reply_text:
+            head = reply_text[:50].replace("\n", " ")
+            tail = reply_text[-40:].replace("\n", " ")
             add_log(
-                f"[{window['name']}] 已定位最新回复文案({len(reply_text)}字): "
-                + reply_text[:60].replace("\n", " ") + "..."
+                f"[{window['name']}] 已定位文案[{how}]({len(reply_text)}字) "
+                f"开头: {head} ... 结尾: {tail}"
             )
             captions = [reply_text]
         else:
-            add_log(f"[{window['name']}] 未能定位最新回复块，退化为全页文案解析", "warning")
+            add_log(
+                f"[{window['name']}] 未定位到最新回复块[{how}]，退化为全页文案解析", "warning"
+            )
             try:
                 text = page.evaluate(_TEXT_JS) or ""
             except Exception:
