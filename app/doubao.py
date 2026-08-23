@@ -286,7 +286,7 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
         pw = sync_playwright().start()
         browser = pw.chromium.connect_over_cdp(cdp, timeout=30000)
         ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-        page = ctx.new_page(timeout=30000)
+        page = ctx.new_page()
 
         # 监听整个上下文的所有响应(含点击封面后新开的播放标签页)
         net_urls = []
