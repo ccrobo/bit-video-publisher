@@ -16,10 +16,37 @@ from .task_runner import run_async
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_targets()
     add_log("服务已启动，访问 http://127.0.0.1:8799/ 打开控制台")
     scheduler_mod.start()
     yield
     scheduler_mod.shutdown()
+
+
+def _migrate_legacy_targets():
+    """旧任务只配了分组没勾窗口:把已填聊天页链接的窗口+组内成员一次性固化到显式目标。"""
+    try:
+        tasks = store.list_tasks()
+        wins = store._read("windows", [])
+        changed = False
+        for t in tasks:
+            if t.get("target_window_ids"):
+                continue
+            linked = [
+                wid for wid, v in (t.get("window_vars") or {}).items()
+                if isinstance(v, dict) and (v.get("source_url") or "").strip()
+            ]
+            gids = set(t.get("target_group_ids") or [])
+            members = [w["id"] for w in wins if w.get("group_id") in gids]
+            ids = list(dict.fromkeys(linked + members))
+            if ids:
+                t["target_window_ids"] = ids
+                changed = True
+                add_log(f"任务[{t.get('name')}] 已迁移 {len(ids)} 个显式目标窗口")
+        if changed:
+            store.save_tasks(tasks)
+    except Exception as e:
+        add_log(f"目标迁移失败(忽略): {e}")
 
 
 app = FastAPI(title="Bit Video Publisher", lifespan=lifespan)

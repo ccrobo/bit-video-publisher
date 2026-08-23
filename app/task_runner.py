@@ -15,16 +15,12 @@ def _today():
 
 
 def resolve_targets(task, windows, configs):
-    ids = list(task.get("target_window_ids") or [])
-    gids = set(task.get("target_group_ids") or [])
-    for w in windows:
-        if w["group_id"] in gids and w["id"] not in ids:
-            ids.append(w["id"])
-    out = []
-    for w in windows:
-        if w["id"] in ids and configs.get(w["id"], {}).get("enabled", False):
-            out.append(w)
-    return out
+    # 目标以显式勾选的窗口为准(分组仅用于前端筛选候选)
+    ids = set(task.get("target_window_ids") or [])
+    return [
+        w for w in windows
+        if w["id"] in ids and configs.get(w["id"], {}).get("enabled", False)
+    ]
 
 
 def build_caption(task, item, caps, state, tid):

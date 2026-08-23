@@ -243,13 +243,15 @@
           </el-form-item>
           <el-divider content-position="left">发布目标与限制</el-divider>
           <el-form-item label="目标分组">
-            <el-select v-model="taskForm.target_group_ids" multiple style="width:100%" placeholder="命中分组下所有已启用窗口">
+            <el-select v-model="taskForm.target_group_ids" multiple style="width:100%" placeholder="可选：筛选下方候选窗口"
+                       @change="onTaskGroupsChange">
               <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id"></el-option>
             </el-select>
+            <div class="muted">选分组后，下方「目标窗口」仅显示组内窗口；不选则显示全部窗口</div>
           </el-form-item>
           <el-form-item label="目标窗口">
-            <el-select v-model="taskForm.target_window_ids" multiple style="width:100%" filterable placeholder="直接指定窗口（需在窗口管理中开启）">
-              <el-option v-for="w in windows" :key="w.id" :label="w.seq + ' - ' + w.name" :value="w.id"></el-option>
+            <el-select v-model="taskForm.target_window_ids" multiple style="width:100%" filterable placeholder="勾选要发布的窗口（需在窗口管理中开启）">
+              <el-option v-for="w in taskWindowOptions" :key="w.id" :label="w.seq + ' - ' + w.name" :value="w.id"></el-option>
             </el-select>
           </el-form-item>
           <template v-if="taskForm.source_type==='doubao_page'">
@@ -508,12 +510,22 @@ const app = createApp({
       target_group_ids:[], target_window_ids:[], window_vars:{},
       daily_limit_per_window:1, close_after_publish:null
     });
-    // 任务弹窗中豆包模式的实际生效目标(显式窗口 + 分组内窗口)
+    // 任务弹窗中豆包模式的实际生效目标(仅显式勾选的窗口)
     const taskTargets = computed(() => {
       const ids = new Set(taskForm.target_window_ids || []);
-      const gids = new Set(taskForm.target_group_ids || []);
-      return (windows.value || []).filter(w => ids.has(w.id) || gids.has(w.group_id));
+      return (windows.value || []).filter(w => ids.has(w.id));
     });
+    // 候选窗口: 选了分组则只显示组内窗口, 否则全部
+    const taskWindowOptions = computed(() => {
+      const gids = new Set(taskForm.target_group_ids || []);
+      if (!gids.size) return windows.value || [];
+      return (windows.value || []).filter(w => gids.has(w.group_id));
+    });
+    function onTaskGroupsChange(){
+      // 分组变化后, 清掉不在候选范围内的已选窗口
+      const ok = new Set((taskWindowOptions.value || []).map(w => w.id));
+      taskForm.target_window_ids = (taskForm.target_window_ids || []).filter(id => ok.has(id));
+    }
     function setWinVar(id, v) {
       if (!taskForm.window_vars) taskForm.window_vars = {};
       const cur = Object.assign({}, taskForm.window_vars[id] || {});
@@ -621,7 +633,7 @@ const app = createApp({
       refreshStatus, startBit, syncAll, filteredWindows, pagedWindows, currentGroupName,
       openWin, closeWin, cfgVisible, cfgRow, cfgForm, editCfg, saveCfg, toggleCfg,
       batchVisible, batchForm, applyBatch, tmap, taskName,
-      taskVisible, taskForm, newTask, editTask, saveTask, delTask, toggleTask, runTask, taskTargets, setWinVar,
+      taskVisible, taskForm, newTask, editTask, saveTask, delTask, toggleTask, runTask, taskTargets, taskWindowOptions, onTaskGroupsChange, setWinVar,
       loadTasks, loadSettings, saveSettings, pollLogs, clearLogView, onTab,
     };
   }
