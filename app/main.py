@@ -196,7 +196,10 @@ def post_task(patch: dict = Body(...)):
     data = _clean_task(patch)
     if not data.get("name"):
         raise HTTPException(400, "任务名称不能为空")
-    if data.get("source_type") == "doubao_page":
+    if data.get("task_type") == "ai_ask":
+        if not (data.get("prompt_text") or "").strip():
+            raise HTTPException(400, "AI提问任务需填写提示词")
+    elif data.get("source_type") == "doubao_page":
         if not any(v.get("source_url") for v in (data.get("window_vars") or {}).values()):
             raise HTTPException(400, "豆包模式需至少为一个目标窗口配置聊天页链接")
     elif not data.get("source_url"):

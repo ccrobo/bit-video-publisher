@@ -98,9 +98,13 @@ def save_settings(patch):
 
 TASK_DEFAULTS = {
     "name": "",
+    "task_type": "video_publish",  # video_publish=抓视频发布 | ai_ask=到对话框自动提问
     "platform": "douyin",
     "enabled": False,
     "cron": "0 9 * * *",
+    "ask_platform": "doubao",  # ai_ask: 提问平台
+    "prompt_text": "",  # ai_ask: 要发送的提示词
+    "ask_wait": 30,  # ai_ask: 发送后等待生成秒数
     "source_type": "json",
     "source_url": "",
     "source_window_id": "",

@@ -169,10 +169,16 @@
     <el-tab-pane label="发布任务" name="tasks">
       <div class="toolbar">
         <el-button type="primary" @click="newTask">+ 新建任务</el-button>
-        <span class="muted">四步向导：内容源 → AI整理 → 发布平台 → 目标与计划</span>
+        <span class="muted">新建任务向导：选择任务类型（视频发布 / AI提问）后按步骤配置</span>
       </div>
       <el-table :data="tasks" border stripe>
         <el-table-column prop="name" label="任务名" width="130" show-overflow-tooltip></el-table-column>
+        <el-table-column label="类型" width="90">
+          <template #default="{row}">
+            <el-tag size="small" v-if="row.task_type==='ai_ask'" type="warning">AI提问</el-tag>
+            <el-tag size="small" v-else>视频发布</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="平台" width="80">
           <template #default="{row}">{{ platformLabel(row.platform) }}</template>
         </el-table-column>
@@ -210,18 +216,50 @@
 
       <el-dialog v-model="taskVisible" :title="taskForm.id ? '编辑任务' : '新建任务'" width="760" top="3vh" :close-on-click-modal="false">
         <el-steps :active="step" finish-status="success" simple style="margin-bottom:20px">
-          <el-step title="内容源"></el-step>
-          <el-step title="AI整理"></el-step>
-          <el-step title="发布平台"></el-step>
-          <el-step title="目标与计划"></el-step>
+          <el-step v-for="(st,i) in wizardSteps" :key="i" :title="st"></el-step>
         </el-steps>
 
-        <!-- 步骤1: 内容源 -->
+        <!-- 步骤1: 任务类型 + 内容源/提问设置 -->
         <div v-show="step===0">
           <el-form :model="taskForm" label-width="130px">
+            <el-form-item label="任务类型" required>
+              <div class="plat-grid">
+                <div class="plat-card" :class="{sel: taskForm.task_type==='video_publish'}" @click="taskForm.task_type='video_publish'">
+                  <div class="pl-name">视频发布</div>
+                  <div class="pl-sub">抓取视频 → AI整理 → 发布到内容平台</div>
+                </div>
+                <div class="plat-card" :class="{sel: taskForm.task_type==='ai_ask'}" @click="switchTaskType('ai_ask')">
+                  <div class="pl-name">AI 提问</div>
+                  <div class="pl-sub">打开各窗口对话框自动发送提示词提问</div>
+                </div>
+              </div>
+            </el-form-item>
+            <el-form-item label="任务名称" required>
+              <el-input v-model="taskForm.name" placeholder="例如：豆包每日视频发布"></el-input>
+            </el-form-item>
+
+            <!-- AI 提问设置 -->
+            <template v-if="taskForm.task_type==='ai_ask'">
+              <el-form-item label="提问平台">
+                <el-select v-model="taskForm.ask_platform" style="width:100%">
+                  <el-option v-for="p in askPlatformList" :key="p.v"
+                             :label="p.label + (p.ready ? '' : '（即将支持）')" :value="p.v" :disabled="!p.ready"></el-option>
+                </el-select>
+                <div class="muted">各窗口需提前在该平台登录好；每个目标窗口配置自己的对话框URL</div>
+              </el-form-item>
+              <el-form-item label="提示词" required>
+                <el-input type="textarea" :rows="8" v-model="taskForm.prompt_text"
+                          placeholder="输入要让AI执行的提示词，执行时将逐个窗口在其对话框中发送"></el-input>
+              </el-form-item>
+              <el-form-item label="发送后等待(秒)">
+                <el-input-number v-model="taskForm.ask_wait" :min="5" :max="600"></el-input-number>
+                <span class="muted" style="margin-left:8px">发送提示词后保持窗口打开的秒数，供AI开始生成</span>
+              </el-form-item>
+            </template>
+
+            <!-- 视频发布: 内容源 -->
+            <template v-else>
             <el-row :gutter="12">
-              <el-col :span="12"><el-form-item label="任务名称" required>
-                <el-input v-model="taskForm.name" placeholder="例如：豆包每日视频发布"></el-input></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="内容源类型">
                 <el-select v-model="taskForm.source_type" style="width:100%">
                   <el-option label="豆包聊天页(浏览器抓取)" value="doubao_page"></el-option>
@@ -247,11 +285,12 @@
               <el-input-number v-model="taskForm.source_wait" :min="5" :max="120"></el-input-number>
               <span class="muted" style="margin-left:8px">每个窗口打开自己的聊天页链接抓取，需该窗口已登录豆包</span>
             </el-form-item>
+            </template>
           </el-form>
         </div>
 
-        <!-- 步骤2: AI整理 -->
-        <div v-show="step===1">
+        <!-- 步骤2: AI整理 (仅视频发布) -->
+        <div v-show="step===1 && taskForm.task_type==='video_publish'">
           <el-form :model="taskForm" label-width="130px">
             <el-form-item label="推理模型" required>
               <el-select v-model="taskForm.ai_model_id" style="width:100%" placeholder="选择用于内容整理的模型">
@@ -272,8 +311,8 @@
           </el-form>
         </div>
 
-        <!-- 步骤3: 发布平台 -->
-        <div v-show="step===2">
+        <!-- 步骤3: 发布平台 (仅视频发布) -->
+        <div v-show="step===2 && taskForm.task_type==='video_publish'">
           <div class="plat-grid">
             <div v-for="p in platformList" :key="p.v" class="plat-card"
                  :class="{sel: taskForm.platform===p.v, dis:!p.ready}"
@@ -287,8 +326,8 @@
           </div>
         </div>
 
-        <!-- 步骤4: 目标与计划 -->
-        <div v-show="step===3">
+        <!-- 最后一步: 目标与计划 -->
+        <div v-show="isTargetStep">
           <el-form :model="taskForm" label-width="130px">
             <el-form-item label="目标分组">
               <el-select v-model="taskForm.target_group_ids" multiple style="width:100%" placeholder="可选：筛选下方候选窗口"
@@ -298,28 +337,32 @@
               <div class="muted">选分组后，下方「目标窗口」仅显示组内窗口；不选则显示全部窗口</div>
             </el-form-item>
             <el-form-item label="目标窗口">
-              <el-select v-model="taskForm.target_window_ids" multiple style="width:100%" filterable placeholder="勾选要发布的窗口（需在窗口管理中开启）">
+              <el-select v-model="taskForm.target_window_ids" multiple style="width:100%" filterable placeholder="勾选要执行的窗口（需在窗口管理中开启）">
                 <el-option v-for="w in taskWindowOptions" :key="w.id" :label="w.seq + ' - ' + w.name" :value="w.id"></el-option>
               </el-select>
             </el-form-item>
-            <template v-if="taskForm.source_type==='doubao_page' && taskTargets.length">
-              <el-divider content-position="left">各窗口聊天页链接（必填）</el-divider>
+            <template v-if="(taskForm.task_type==='ai_ask' || taskForm.source_type==='doubao_page') && taskTargets.length">
+              <el-divider content-position="left">{{ winUrlLabel }}（必填）</el-divider>
               <el-form-item v-for="tw in taskTargets" :key="tw.id" :label="tw.seq + ' - ' + tw.name" label-width="170px" required>
                 <el-input :model-value="(taskForm.window_vars[tw.id] && taskForm.window_vars[tw.id].source_url) || ''"
-                          placeholder="必填：该窗口专属的豆包聊天页链接，如 https://www.doubao.com/chat/xxxx"
+                          :placeholder="'必填：该窗口专属的' + (taskForm.task_type==='ai_ask' ? '对话框链接，如 https://www.doubao.com/chat/xxxx' : '豆包聊天页链接，如 https://www.doubao.com/chat/xxxx')"
                           @update:model-value="v => setWinVar(tw.id, v)"></el-input>
               </el-form-item>
             </template>
             <el-row :gutter="12">
-              <el-col :span="12"><el-form-item label="单窗口日上限">
-                <el-input-number v-model="taskForm.daily_limit_per_window" :min="0" :max="50" style="width:100%"></el-input-number>
-                <div class="muted">0 表示不限制</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="执行周期 cron">
                 <el-select v-model="taskForm.cron" filterable allow-create default-first-option style="width:100%">
                   <el-option v-for="c in cronPresets" :key="c.v" :label="c.l + ' (' + c.v + ')'" :value="c.v"></el-option>
                 </el-select></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="是否启用">
+                <el-switch v-model="taskForm.enabled"></el-switch>
+                <div class="muted">开启后按 cron 定时自动执行</div></el-form-item></el-col>
             </el-row>
+            <template v-if="taskForm.task_type!=='ai_ask'">
             <el-row :gutter="12">
+              <el-col :span="8"><el-form-item label="单窗口日上限">
+                <el-input-number v-model="taskForm.daily_limit_per_window" :min="0" :max="50" style="width:100%"></el-input-number>
+                <div class="muted">0 表示不限制</div></el-form-item></el-col>
               <el-col :span="8"><el-form-item label="允许重复发布">
                 <el-switch v-model="taskForm.allow_repeat"></el-switch>
                 <div class="muted">开启(默认)：每轮发布最新视频，即使已发布过；关闭：同源中已发布的不再重复</div>
@@ -330,16 +373,15 @@
                   <el-option label="是" :value="true"></el-option>
                   <el-option label="否" :value="false"></el-option>
                 </el-select></el-form-item></el-col>
-              <el-col :span="8"><el-form-item label="是否启用">
-                <el-switch v-model="taskForm.enabled"></el-switch></el-form-item></el-col>
             </el-row>
+            </template>
           </el-form>
         </div>
 
         <template #footer>
           <el-button v-if="step>0" @click="prevStep">上一步</el-button>
-          <el-button v-if="step<3" type="primary" @click="nextStep">下一步</el-button>
-          <el-button v-if="step===3" type="primary" @click="saveTask">保存任务</el-button>
+          <el-button v-if="step<lastStep" type="primary" @click="nextStep">下一步</el-button>
+          <el-button v-if="step===lastStep" type="primary" @click="saveTask">保存任务</el-button>
           <el-button @click="taskVisible=false">取消</el-button>
         </template>
       </el-dialog>
@@ -643,13 +685,31 @@ const app = createApp({
     ];
     const platformLabel = p => (platformList.find(x=>x.v===p) || {}).label || p;
     const blankTask = () => ({
-      id:'', name:'', platform:'douyin', enabled:true, cron:'0 9 * * *',
+      id:'', name:'', task_type:'video_publish', platform:'douyin', enabled:true, cron:'0 9 * * *',
+      ask_platform:'doubao', prompt_text:'', ask_wait:30,
       source_type:'doubao_page', source_url:'', source_window_id:'', source_wait:15,
       items_path:'data', field_title:'title', field_video:'video_url',
       fetch_count:1, ai_model_id:'', ai_prompt:'', allow_repeat:true,
       target_group_ids:[], target_window_ids:[], window_vars:{},
       daily_limit_per_window:1, close_after_publish:null
     });
+    const askPlatformList = [
+      { v:'doubao', label:'豆包', ready:true },
+      { v:'workbuddy', label:'WorkBuddy', ready:false },
+      { v:'qianwen', label:'通义千问', ready:false },
+      { v:'yuanbao', label:'腾讯元宝', ready:false },
+      { v:'yuque', label:'语雀', ready:false },
+      { v:'keling', label:'可灵', ready:false },
+      { v:'jimeng', label:'即梦', ready:false },
+    ];
+    // 向导步骤与索引随任务类型变化:
+    // 视频发布 = 内容源/提问设置(0) -> AI整理(1) -> 发布平台(2) -> 目标与计划(3)
+    // AI 提问  = 类型与提示词(0) -> 目标与计划(1)
+    const isAsk = computed(() => taskForm.task_type === 'ai_ask');
+    const wizardSteps = computed(() => isAsk.value ? ['任务与提示词','目标与计划'] : ['内容源','AI整理','发布平台','目标与计划']);
+    const lastStep = computed(() => wizardSteps.value.length - 1);
+    const isTargetStep = computed(() => step.value === lastStep.value);
+    const winUrlLabel = computed(() => isAsk.value ? '各窗口对话框URL' : '各窗口聊天页链接');
     // ------- AI 模型 -------
     const models = ref([]);
     const modelVisible = ref(false);
@@ -732,8 +792,12 @@ const app = createApp({
       loadModels();
     }
     function validateStep(s){
+      if(!taskForm.name){ ElementPlus.ElMessage.warning('请填写任务名称'); return false; }
+      if(taskForm.task_type === 'ai_ask'){
+        if(s===0 && !taskForm.prompt_text){ ElementPlus.ElMessage.warning('请填写提示词'); return false; }
+        return true;
+      }
       if(s===0){
-        if(!taskForm.name){ ElementPlus.ElMessage.warning('请填写任务名称'); return false; }
         if(taskForm.source_type!=='doubao_page' && !taskForm.source_url){ ElementPlus.ElMessage.warning('请填写视频源URL'); return false; }
       }
       if(s===1 && !taskForm.ai_model_id){
@@ -741,16 +805,22 @@ const app = createApp({
       }
       return true;
     }
-    function nextStep(){ if(validateStep(step.value)) step.value = Math.min(3, step.value + 1); }
+    function switchTaskType(t){
+      taskForm.task_type = t;
+      const maxS = t==='ai_ask' ? 1 : 3;
+      if(step.value > maxS) step.value = 0;
+    }
+    function nextStep(){ if(validateStep(step.value)) step.value = Math.min(lastStep.value, step.value + 1); }
     function prevStep(){ step.value = Math.max(0, step.value - 1); }
 
     async function saveTask() {
-      for(let s=0;s<3;s++){ if(!validateStep(s)) return; }
-      if (taskForm.source_type === 'doubao_page') {
+      for(let s=0;s<lastStep.value;s++){ if(!validateStep(s)) return; }
+      const needWinUrls = taskForm.task_type === 'ai_ask' || taskForm.source_type === 'doubao_page';
+      if (needWinUrls) {
         const missing = taskTargets.value.filter(tw => !(taskForm.window_vars[tw.id] && taskForm.window_vars[tw.id].source_url));
         if (!taskTargets.value.length) { ElementPlus.ElMessage.warning('请先选择目标窗口'); return; }
         if (missing.length) {
-          ElementPlus.ElMessage.warning(`还有 ${missing.length} 个目标窗口未填聊天页链接：${missing.slice(0,3).map(w=>w.name).join('、')}${missing.length>3?' 等':''}`);
+          ElementPlus.ElMessage.warning(`还有 ${missing.length} 个目标窗口未填${winUrlLabel.value}：${missing.slice(0,3).map(w=>w.name).join('、')}${missing.length>3?' 等':''}`);
           return;
         }
       }
@@ -838,6 +908,7 @@ const app = createApp({
       batchVisible, batchForm, applyBatch, tmap, taskName,
       taskVisible, taskForm, newTask, editTask, saveTask, delTask, toggleTask, runTask, taskTargets, taskWindowOptions, onTaskGroupsChange, setWinVar,
       step, nextStep, prevStep, platformList, platformLabel,
+      isAsk, wizardSteps, lastStep, isTargetStep, winUrlLabel, askPlatformList, switchTaskType,
       models, modelVisible, modelEditing, testing, modelForm, newModel, editModel, saveModel, delModel, toggleModel, testModel, modelName,
       defaultPromptPreview, loadModels,
       loadTasks, loadSettings, saveSettings, pollLogs, clearLogView, onTab,

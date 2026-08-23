@@ -117,6 +117,11 @@ def run_task(task_id, only_window_id=None):
         add_log(f"[{name}] 没有可执行的目标窗口（请先在【窗口管理】中开启抓取并绑定该任务）", "error")
         return
 
+    # AI提问任务: 独立流程(打开对话框URL发送提示词)
+    if task.get("task_type") == "ai_ask":
+        run_ai_ask(task, bit, settings, targets)
+        return
+
     headers = {"User-Agent": "Mozilla/5.0"}
     dl_root = Path(settings.get("download_dir"))
     limit = int(task.get("daily_limit_per_window") or 0)
@@ -294,6 +299,34 @@ def run_task(task_id, only_window_id=None):
             store.save_state(state)
 
     add_log(f"[{name}] 本轮结束: 成功 {ok_cnt} 个视频, 失败 {fail_cnt} 次")
+
+
+def run_ai_ask(task, bit, settings, targets):
+    """AI提问任务: 逐窗口打开各自的对话框URL发送提示词"""
+    from .asker import ask_in_chat
+
+    name = task.get("name") or task.get("id")
+    prompt = (task.get("prompt_text") or "").strip()
+    if not prompt:
+        add_log(f"[{name}] 未配置提示词，任务结束", "error")
+        return
+    platform = task.get("ask_platform") or "doubao"
+    wvars = task.get("window_vars") or {}
+    wait_s = int(task.get("ask_wait") or 30)
+    ok_cnt, fail_cnt = 0, 0
+    add_log(f"[{name}] AI提问模式: 平台[{platform}], 目标 {len(targets)} 个窗口")
+    for w in targets:
+        src = ((wvars.get(w["id"]) or {}).get("source_url") or "").strip()
+        if not src:
+            add_log(f"[{name}] 窗口[{w['name']}] 未配置对话框URL，跳过（每个目标窗口必须有自己的链接）", "error")
+            continue
+        try:
+            ask_in_chat(bit, settings, src, w, prompt, wait_s)
+            ok_cnt += 1
+        except Exception as e:
+            fail_cnt += 1
+            add_log(f"[{name}] 窗口[{w['name']}] 提问失败: {e}", "error")
+    add_log(f"[{name}] 本轮结束: 成功提问 {ok_cnt} 个窗口, 失败 {fail_cnt} 次")
 
 
 def safe_run(task_id, only_window_id=None):
