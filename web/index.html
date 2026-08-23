@@ -320,13 +320,17 @@
                 </el-select></el-form-item></el-col>
             </el-row>
             <el-row :gutter="12">
-              <el-col :span="12"><el-form-item label="发布后关窗">
+              <el-col :span="8"><el-form-item label="允许重复发布">
+                <el-switch v-model="taskForm.allow_repeat"></el-switch>
+                <div class="muted">开启(默认)：每轮发布最新视频，即使已发布过；关闭：同源中已发布的不再重复</div>
+              </el-form-item></el-col>
+              <el-col :span="8"><el-form-item label="发布后关窗">
                 <el-select v-model="taskForm.close_after_publish" style="width:100%">
                   <el-option label="跟随全局设置" :value="null"></el-option>
                   <el-option label="是" :value="true"></el-option>
                   <el-option label="否" :value="false"></el-option>
                 </el-select></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="是否启用">
+              <el-col :span="8"><el-form-item label="是否启用">
                 <el-switch v-model="taskForm.enabled"></el-switch></el-form-item></el-col>
             </el-row>
           </el-form>
@@ -632,7 +636,7 @@ const app = createApp({
       id:'', name:'', platform:'douyin', enabled:true, cron:'0 9 * * *',
       source_type:'doubao_page', source_url:'', source_window_id:'', source_wait:15,
       items_path:'data', field_title:'title', field_video:'video_url',
-      fetch_count:1, ai_model_id:'', ai_prompt:'',
+      fetch_count:1, ai_model_id:'', ai_prompt:'', allow_repeat:true,
       target_group_ids:[], target_window_ids:[], window_vars:{},
       daily_limit_per_window:1, close_after_publish:null
     });

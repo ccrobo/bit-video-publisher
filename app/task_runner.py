@@ -161,11 +161,18 @@ def run_task(task_id, only_window_id=None):
                 .setdefault(task_id, {})
                 .setdefault(w["id"], [])
             )
-            fresh = [u for u in vids if u not in done_w]
-            if not fresh:
-                add_log(f"[{name}] 窗口[{w['name']}] 无新视频，跳过（本聊天已发布的不再重复）")
-                continue
-            for i, u in enumerate(fresh[:count_n]):
+            if task.get("allow_repeat", True):
+                # 允许重复: 不做已发布过滤, 每轮取最新视频
+                batch = vids[:count_n]
+                if not batch:
+                    add_log(f"[{name}] 窗口[{w['name']}] 未抓取到视频，跳过")
+                    continue
+            else:
+                batch = [u for u in vids if u not in done_w]
+                if not batch:
+                    add_log(f"[{name}] 窗口[{w['name']}] 无新视频，跳过（本聊天已发布的不再重复，可在任务中开启「允许重复发布」）")
+                    continue
+            for i, u in enumerate(batch):
                 try:
                     vpath = sources.download_video(
                         u, dl_root / task_id / w["id"],
@@ -232,12 +239,14 @@ def run_task(task_id, only_window_id=None):
             return
 
         done = set(state.setdefault("downloaded", {}).setdefault(task_id, []))
-        fresh = [it for it in items if it["video_url"] not in done]
-        if not fresh:
-            add_log(f"[{name}] 无新视频，跳过（共 {len(items)} 个已发布/已下载）")
-            return
         count = max(1, int(task.get("fetch_count") or 1))
-        batch = fresh[:count]
+        if task.get("allow_repeat", True):
+            batch = items[:count]
+        else:
+            batch = [it for it in items if it["video_url"] not in done]
+            if not batch:
+                add_log(f"[{name}] 无新视频，跳过（共 {len(items)} 个已发布/已下载，可在任务中开启「允许重复发布」）")
+                return
 
         for it in batch:
             content = prepare_content(task, settings, it.get("title") or "", name)

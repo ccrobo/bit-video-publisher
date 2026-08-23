@@ -111,6 +111,7 @@ TASK_DEFAULTS = {
     "fetch_count": 1,
     "ai_model_id": "",
     "ai_prompt": "",
+    "allow_repeat": True,
     "target_group_ids": [],
     "target_window_ids": [],
     "window_vars": {},
