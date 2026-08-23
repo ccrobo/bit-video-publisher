@@ -359,27 +359,58 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
             videos = [u for u in merged if _looks_media(u)]
             if videos:
                 break
-            # 逐屏向上滚动, 让虚拟列表挂载历史视频消息
-            moved = False
+
+            # 区分两种情况:
+            has_video_el = False
             try:
-                moved = page.evaluate(_SCROLL_UP_JS)
+                has_video_el = page.evaluate("() => document.querySelectorAll('video').length > 0")
             except Exception:
                 pass
-            if not moved and not clicked:
-                # 已滚到顶部仍无视频: 悬停+点击视频封面触发播放
-                if _hover_click_cover(page):
-                    clicked = True
-                    add_log("已点击视频封面卡片，等待播放加载...")
-                    time.sleep(4)
-                    continue
-            if not moved and clicked and not downloaded:
-                # 仍无直链则点卡片"下载"按钮, 迫使浏览器请求真实mp4地址
-                if _click_download_btn(page):
-                    downloaded = True
-                    add_log("已点击下载按钮获取视频直链...")
-                    time.sleep(5)
-                    continue
-            time.sleep(3)
+
+            if has_video_el:
+                # 页面上已有视频卡片(打开即在底部, 这就是最新视频), 只是还没拿到直链
+                # (豆包初始只渲染封面+blob占位, 直链要点开播放才请求)。
+                # 绝不向上滚动——滚动会把最新卡片滚出虚拟列表视口。
+                try:
+                    page.wait_for_function(
+                        r"""() => [...document.querySelectorAll('video')].some(v => (v.currentSrc || v.src || '').startsWith('http'))
+ || performance.getEntriesByType('resource').some(e => /douyinvod|\.mp4|\/video\/tos\//.test(e.name))""",
+                        timeout=5000,
+                    )
+                    continue  # 直链已出现, 回到循环顶部重新收集
+                except Exception:
+                    pass
+                if not clicked:
+                    # 等不到直链: 悬停+点击封面触发播放, 迫使浏览器请求mp4
+                    if _hover_click_cover(page):
+                        clicked = True
+                        add_log("已点击视频封面卡片，等待播放加载...")
+                        time.sleep(4)
+                        continue
+                if not downloaded:
+                    # 再不行点卡片"下载"按钮, 直接逼出真实下载地址
+                    if _click_download_btn(page):
+                        downloaded = True
+                        add_log("已点击下载按钮获取视频直链...")
+                        time.sleep(5)
+                        continue
+                time.sleep(2)
+            else:
+                # 视口内确实没有视频消息: 逐屏向上滚动挂载历史视频
+                moved = False
+                try:
+                    moved = page.evaluate(_SCROLL_UP_JS)
+                except Exception:
+                    pass
+                if not moved and clicked:
+                    # 已滚到顶部且点过封面仍无视频: 尝试点击兜底后结束
+                    if not downloaded and _click_download_btn(page):
+                        downloaded = True
+                        add_log("已点击下载按钮获取视频直链...")
+                        time.sleep(5)
+                        continue
+                    break
+                time.sleep(2)
 
         try:
             text = page.evaluate(_TEXT_JS) or ""
