@@ -31,6 +31,36 @@ _VIDEO_JS = """
 
 _TEXT_JS = "() => document.body.innerText"
 
+# 以最新视频卡片为锚点, 取其所在的整条回复消息(=页面最底部最新回复)的文本作为文案源
+_LATEST_REPLY_TEXT_JS = """
+() => {
+  let cards = [...document.querySelectorAll('[class*="block-video"],[class*="image-box-grid-item"]')]
+    .filter(el => el.getBoundingClientRect().width > 120);
+  if (!cards.length) {
+    cards = [...document.querySelectorAll('img[src*="video_dsz"], img[src*="tplv-a9rns"]')]
+      .map(im => im.closest('[class*="block-video"]') || im.parentElement)
+      .filter(Boolean);
+  }
+  if (!cards.length) return '';
+  const card = cards[cards.length - 1];
+  let scroller = card.parentElement;
+  while (scroller && scroller !== document.body) {
+    const c = (scroller.className || '').toString();
+    if (/scroller|v_list/i.test(c)) break;
+    scroller = scroller.parentElement;
+  }
+  const root = (scroller && scroller !== document.body) ? scroller : document.body;
+  let top = card;
+  while (top.parentElement && top.parentElement !== root) top = top.parentElement;
+  let t = ((top.innerText) || '').trim();
+  if (!t) {
+    const msg = card.closest('[class*="message"],[class*="receive"],[class*="agent"]');
+    t = msg ? (msg.innerText || '').trim() : '';
+  }
+  return t;
+}
+"""
+
 # 豆包聊天区是虚拟滚动列表(v_list_scroller), 视口外的消息(含视频卡)不会渲染。
 # 需要逐屏向上滚动促使历史消息挂载
 _SCROLL_UP_JS = """
@@ -368,11 +398,19 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                 pass
             time.sleep(3)
 
+        # 文案优先取"包含最新视频的那条回复"(页面最底部), 无则退化为全页解析
+        reply_text = ""
         try:
-            text = page.evaluate(_TEXT_JS) or ""
+            reply_text = page.evaluate(_LATEST_REPLY_TEXT_JS) or ""
         except Exception:
-            text = ""
-        captions = _parse_captions(text)
+            reply_text = ""
+        captions = _parse_captions(reply_text) if reply_text else []
+        if not captions:
+            try:
+                text = page.evaluate(_TEXT_JS) or ""
+            except Exception:
+                text = ""
+            captions = _parse_captions(text)
 
         # 最新视频保持在列表头部(最新卡片直链优先, 其余按新->旧); 发布永远取头部
         if latest_src:
