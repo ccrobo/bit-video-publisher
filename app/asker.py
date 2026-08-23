@@ -79,8 +79,10 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
         page = ctx.new_page()
 
         page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
-        # 不等 networkidle(豆包有心跳长连接永远达不到, 只会白等满超时);
-        # 后面的输入框轮询本身就是就绪检测
+        try:
+            page.wait_for_load_state("networkidle", timeout=20000)
+        except Exception:
+            pass
 
         cur = page.url or ""
         if "/login" in cur or "passport" in cur:
@@ -94,13 +96,9 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
         except Exception:
             pass
 
-        # 等待输入框出现: DOM事件驱动, 元素一渲染出来立即返回; 之后仅做坐标定位
-        try:
-            page.wait_for_selector('textarea, [contenteditable="true"]', timeout=15000)
-        except Exception:
-            pass
+        # 等待输入框出现
         pos = None
-        deadline = time.time() + 3
+        deadline = time.time() + 20
         while time.time() < deadline:
             try:
                 pos = page.evaluate(_FIND_INPUT_JS)
@@ -108,7 +106,7 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
                 pos = None
             if pos:
                 break
-            time.sleep(0.4)
+            time.sleep(1.5)
         if not pos:
             raise RuntimeError(f"窗口[{window['name']}] 页面未找到聊天输入框，请确认链接是平台对话页")
 
