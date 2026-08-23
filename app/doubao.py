@@ -31,9 +31,11 @@ _VIDEO_JS = """
 
 _TEXT_JS = "() => document.body.innerText"
 
-# 以最新视频卡片为锚点, 取其所在的整条回复消息(=页面最底部最新回复)的文本作为文案源
+# 以最新视频卡片为锚点, 取其所在的整条回复消息(=页面最底部最新回复)的原文作为文案材料。
+# 豆包定时任务输出为结构化标记(【标题】【描述】【解答】等), 原文直接交由AI整理, 不做二次加工
 _LATEST_REPLY_TEXT_JS = """
 () => {
+  const bodyLen = (document.body.innerText || '').length;
   let cards = [...document.querySelectorAll('[class*="block-video"],[class*="image-box-grid-item"]')]
     .filter(el => el.getBoundingClientRect().width > 120);
   if (!cards.length) {
@@ -43,21 +45,25 @@ _LATEST_REPLY_TEXT_JS = """
   }
   if (!cards.length) return '';
   const card = cards[cards.length - 1];
-  let scroller = card.parentElement;
-  while (scroller && scroller !== document.body) {
-    const c = (scroller.className || '').toString();
-    if (/scroller|v_list/i.test(c)) break;
-    scroller = scroller.parentElement;
+  const okLen = t => t && t.length > 30 && t.length < Math.max(800, bodyLen * 0.5);
+  // 策略1: 最近的可滚动祖先(虚拟列表容器), 其直接子级即为一条消息(最后一条=最新回复)
+  let sc = card.parentElement;
+  while (sc && sc !== document.body && !(sc.scrollHeight > sc.clientHeight + 100)) {
+    sc = sc.parentElement;
   }
-  const root = (scroller && scroller !== document.body) ? scroller : document.body;
-  let top = card;
-  while (top.parentElement && top.parentElement !== root) top = top.parentElement;
-  let t = ((top.innerText) || '').trim();
-  if (!t) {
-    const msg = card.closest('[class*="message"],[class*="receive"],[class*="agent"]');
-    t = msg ? (msg.innerText || '').trim() : '';
+  if (sc && sc !== document.body) {
+    let top = card;
+    while (top.parentElement && top.parentElement !== sc) top = top.parentElement;
+    const t = ((top.innerText) || '').trim();
+    if (okLen(t)) return t.slice(0, 6000);
   }
-  return t;
+  // 策略2: 特征类名兜底(message/receive/agent/container)
+  const msg = card.closest('[class*="message"],[class*="receive"],[class*="agent"],[class*="container-"]');
+  if (msg) {
+    const t = ((msg.innerText) || '').trim();
+    if (okLen(t)) return t.slice(0, 6000);
+  }
+  return '';
 }
 """
 
@@ -398,14 +404,21 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                 pass
             time.sleep(3)
 
-        # 文案优先取"包含最新视频的那条回复"(页面最底部), 无则退化为全页解析
+        # 文案材料优先取"包含最新视频的那条回复"原文(页面最底部), 直接交AI整理;
+        # 定位失败才退化为全页文本解析
         reply_text = ""
         try:
-            reply_text = page.evaluate(_LATEST_REPLY_TEXT_JS) or ""
+            reply_text = (page.evaluate(_LATEST_REPLY_TEXT_JS) or "").strip()
         except Exception:
             reply_text = ""
-        captions = _parse_captions(reply_text) if reply_text else []
-        if not captions:
+        if reply_text:
+            add_log(
+                f"[{window['name']}] 已定位最新回复文案({len(reply_text)}字): "
+                + reply_text[:60].replace("\n", " ") + "..."
+            )
+            captions = [reply_text]
+        else:
+            add_log(f"[{window['name']}] 未能定位最新回复块，退化为全页文案解析", "warning")
             try:
                 text = page.evaluate(_TEXT_JS) or ""
             except Exception:
