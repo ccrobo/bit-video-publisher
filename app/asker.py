@@ -15,10 +15,10 @@ ASK_PLATFORMS = [
     {"id": "jimeng", "name": "即梦", "ready": False},
 ]
 
-# 定位聊天输入框: 优先 textarea, 其次 contenteditable 编辑区(豆包为后者)
+# 定位聊天输入框: 优先 textarea, 其次 contenteditable 编辑区(豆包为 tiptap ProseMirror, 高度约24px)
 _FIND_INPUT_JS = """
 () => {
-  const vis = el => { const r = el.getBoundingClientRect(); return r.width > 80 && r.height > 20; };
+  const vis = el => { const r = el.getBoundingClientRect(); return r.width > 80 && r.height >= 20; };
   const tas = [...document.querySelectorAll('textarea')].filter(vis);
   if (tas.length) {
     const t = tas[tas.length - 1];
@@ -26,7 +26,7 @@ _FIND_INPUT_JS = """
     return { type: 'textarea', x: r.x + r.width / 2, y: r.y + r.height / 2 };
   }
   const eds = [...document.querySelectorAll('[contenteditable="true"]')]
-    .filter(e => e.getBoundingClientRect().height > 24);
+    .filter(e => e.getBoundingClientRect().height >= 20);
   if (eds.length) {
     const e = eds[eds.length - 1];
     const r = e.getBoundingClientRect();
@@ -39,9 +39,9 @@ _FIND_INPUT_JS = """
 # 输入框是否已有内容(用于判断提示词是否注入成功)
 _INPUT_HAS_TEXT_JS = """
 () => {
-  const tas = [...document.querySelectorAll('textarea')].filter(t => t.getBoundingClientRect().height > 20);
+  const tas = [...document.querySelectorAll('textarea')].filter(t => t.getBoundingClientRect().height >= 20);
   if (tas.length) return (tas[tas.length - 1].value || '').trim().length > 0;
-  const eds = [...document.querySelectorAll('[contenteditable="true"]')].filter(e => e.getBoundingClientRect().height > 24);
+  const eds = [...document.querySelectorAll('[contenteditable="true"]')].filter(e => e.getBoundingClientRect().height >= 20);
   if (eds.length) return (eds[eds.length - 1].innerText || '').trim().length > 0;
   return null;
 }
