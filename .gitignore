@@ -8,6 +8,11 @@ __pycache__/
 .venv/
 venv/
 
+# 临时 node 依赖（仅本地单元测试用，不入库）
+node_modules/
+package.json
+package-lock.json
+
 # 日志与临时文件
 *.log
 *.tmp

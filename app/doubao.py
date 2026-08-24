@@ -33,27 +33,88 @@ _TEXT_JS = "() => document.body.innerText"
 
 # 定位页面最底部最新回复的原文作为文案材料(交AI整理, 不做二次加工)。
 # 返回 {how: 策略名, text: 回复原文}, 便于日志诊断
+#
+# 策略更新(解决: 用户提问含【标题】等标记时被误判为最新AI回复):
+# A1: 含【生成时间】的"最小气泡块" —— 只有AI回复才会带, 文档序最后 = 最新AI回复 (100%准)
+# A2: AI角色气泡 (含agent/receive/bot/reply 不含 user/send/my/query) 且含【标题/描述/解答/旁白】
+# A3: 旧通用 mark-block (仍排除用户气泡) 兜底
+# 之后才轮到: scroller-anchor / closest
 _LATEST_REPLY_TEXT_JS = """
 () => {
-  const MARK = /【(标题|描述|解答|旁白|问题|生成时间)】/;
+  const GENERIC_MARK = /【(标题|描述|解答|旁白|问题)】/;
+  const TS_MARK = /【生成时间】/;
   const bodyLen = (document.body.innerText || '').length;
-  const okLen = t => t && t.length > 30 && t.length < Math.max(800, bodyLen * 0.5);
+  const maxBodyLen = t => t && t.length < Math.max(1200, bodyLen);
+  // 用户气泡排除: 任一层的类/角色/属性含有用户发送侧关键词
+  const USER_HINT = /(^|[-_ ])(user|my|me|owner|query|send|sender|prompt|inputs?|question|ask|qbox)([-_ ]|$)/i;
+  const AI_HINT   = /(^|[-_ ])(agent|bot|reply|receive|receiver|assistant|model|answer|chatbot|message[-_]?in)([-_ ]|$)/i;
+  const containerLike = c => (c || '').startsWith('container-') || /message|receive|agent|reply|chat/i.test(c);
+  const hasUserMark = el => {
+    let n = el; let depth = 0;
+    while (n && n !== document.body && depth < 6) {
+      const c = ((n.className || '') + ' ' + (n.id || '') + ' ' + (n.getAttribute && n.getAttribute('role') || '')).toString();
+      if (USER_HINT.test(c)) return true;
+      n = n.parentElement; depth++;
+    }
+    return false;
+  };
+  const hasAIMark = el => {
+    let n = el; let depth = 0;
+    while (n && n !== document.body && depth < 6) {
+      const c = ((n.className || '') + ' ' + (n.id || '') + ' ' + (n.getAttribute && n.getAttribute('role') || '')).toString();
+      if (AI_HINT.test(c)) return true;
+      n = n.parentElement; depth++;
+    }
+    return false;
+  };
+  const collectLeaves = list => {
+    return list.filter(x => !list.some(y => y !== x && x.el.contains(y.el)));
+  };
 
-  // 策略A: 含结构化标记的最小消息块, 文档序最后一个=最新回复
+  // --- A1: 【生成时间】强标记 (只有AI会写) ---
+  const a1 = [];
+  for (const d of document.querySelectorAll('div')) {
+    if (!containerLike((d.className || '').toString())) continue;
+    if (hasUserMark(d)) continue;
+    const t = d.innerText || '';
+    if (TS_MARK.test(t) && maxBodyLen(t)) a1.push({ el: d, t: t.trim() });
+  }
+  const a1Leaves = collectLeaves(a1);
+  if (a1Leaves.length) {
+    const last = a1Leaves[a1Leaves.length - 1];
+    if ((last.t || '').length > 10) return { how: 'mark-ts(' + a1Leaves.length + ')', text: last.t };
+  }
+
+  // --- A2: AI角色气泡 + 至少有 标题/描述/解答/旁白 任一项 ---
+  const a2 = [];
+  for (const d of document.querySelectorAll('div')) {
+    if (!containerLike((d.className || '').toString())) continue;
+    if (hasUserMark(d)) continue;
+    if (!hasAIMark(d)) continue;
+    const t = d.innerText || '';
+    if (GENERIC_MARK.test(t) && maxBodyLen(t)) a2.push({ el: d, t: t.trim() });
+  }
+  const a2Leaves = collectLeaves(a2);
+  if (a2Leaves.length) {
+    const last = a2Leaves[a2Leaves.length - 1];
+    if ((last.t || '').length > 30) return { how: 'mark-ai(' + a2Leaves.length + ')', text: last.t };
+  }
+
+  // --- A3: 旧策略(兜底) —— 但先排除用户气泡 ---
   const cand = [];
   for (const d of document.querySelectorAll('div')) {
-    const c = (d.className || '').toString();
-    if (!(c.startsWith('container-') || /message|receive|agent/i.test(c))) continue;
+    if (!containerLike((d.className || '').toString())) continue;
+    if (hasUserMark(d)) continue;
     const t = d.innerText || '';
-    if (MARK.test(t) && t.length < 8000) cand.push({ el: d, t: t.trim() });
+    if (GENERIC_MARK.test(t) && maxBodyLen(t)) cand.push({ el: d, t: t.trim() });
   }
-  const leaves = cand.filter(x => !cand.some(y => y !== x && x.el.contains(y.el)));
+  const leaves = collectLeaves(cand);
   if (leaves.length) {
     const last = leaves[leaves.length - 1];
-    if (okLen(last.t)) return { how: 'mark-block(' + leaves.length + ')', text: last.t };
+    if ((last.t || '').length > 30) return { how: 'mark-block(' + leaves.length + ')', text: last.t };
   }
 
-  // 视频卡片锚点
+  // 视频卡片锚点 (保持原逻辑不变)
   let cards = [...document.querySelectorAll('[class*="block-video"],[class*="image-box-grid-item"]')]
     .filter(el => el.getBoundingClientRect().width > 120);
   if (!cards.length) {
@@ -63,7 +124,7 @@ _LATEST_REPLY_TEXT_JS = """
   }
   const card = cards.length ? cards[cards.length - 1] : null;
 
-  // 策略B: 最近可滚动祖先(虚拟列表容器), 其直接子级=一条消息, 取含视频那条
+  // 策略B: 最近可滚动祖先
   if (card) {
     let sc = card.parentElement;
     while (sc && sc !== document.body && !(sc.scrollHeight > sc.clientHeight + 100)) {
@@ -73,13 +134,13 @@ _LATEST_REPLY_TEXT_JS = """
       let top = card;
       while (top.parentElement && top.parentElement !== sc) top = top.parentElement;
       const t = ((top.innerText) || '').trim();
-      if (okLen(t)) return { how: 'scroller-anchor', text: t.slice(0, 6000) };
+      if (t && t.length > 30 && maxBodyLen(t)) return { how: 'scroller-anchor', text: t.slice(0, 6000) };
     }
-    // 策略C: 特征类名兜底
-    const msg = card.closest('[class*="message"],[class*="receive"],[class*="agent"],[class*="container-"]');
-    if (msg) {
+    // 策略C: 特征类名兜底 + 不是用户气泡
+    const msg = card.closest('[class*="message"],[class*="receive"],[class*="agent"],[class*="container-"],[class*="reply"]');
+    if (msg && !hasUserMark(msg)) {
       const t = ((msg.innerText) || '').trim();
-      if (okLen(t)) return { how: 'closest', text: t.slice(0, 6000) };
+      if (t && t.length > 30) return { how: 'closest', text: t.slice(0, 6000) };
     }
   }
   return { how: 'none', text: '' };
