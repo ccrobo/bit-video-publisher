@@ -316,6 +316,8 @@ def run_ai_ask(task, bit, settings, targets):
     platform = task.get("ask_platform") or "doubao"
     wvars = task.get("window_vars") or {}
     wait_s = int(task.get("ask_wait") or 30)
+    ask_vars = list(task.get("ask_vars") or [])
+    video_mode = bool(task.get("ask_video_mode") or False)
     limit = int(task.get("ask_daily_limit") or 0)
     model = None
     if limit > 0:
@@ -327,6 +329,8 @@ def run_ai_ask(task, bit, settings, targets):
     add_log(
         f"[{name}] AI提问模式: 平台[{platform}], 目标 {len(targets)} 个窗口"
         + (f", 每日上限 {limit} 次/窗口" if limit > 0 else "")
+        + (", 豆包视频生成模式" if video_mode else "")
+        + (f", 变量补充: {ask_vars}" if ask_vars else "")
     )
     for w in targets:
         src = ((wvars.get(w["id"]) or {}).get("source_url") or "").strip()
@@ -351,7 +355,7 @@ def run_ai_ask(task, bit, settings, targets):
                 add_log(f"[{name}] 窗口[{w['name']}] 今日已达提问上限({limit})，跳过")
                 continue
         try:
-            ask_in_chat(bit, settings, src, w, prompt, wait_s)
+            ask_in_chat(bit, settings, src, w, prompt, wait_s, ask_vars=ask_vars, video_mode=video_mode)
             ok_cnt += 1
         except Exception as e:
             fail_cnt += 1

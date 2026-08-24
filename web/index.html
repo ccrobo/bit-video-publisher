@@ -250,7 +250,20 @@
                   </el-option-group>
                 </el-select>
                 <el-input type="textarea" :rows="8" v-model="taskForm.prompt_text"
-                          placeholder="输入要让AI执行的提示词，执行时将逐个窗口在其对话框中发送"></el-input>
+                          placeholder="可使用占位符 {当前时间} {当前日期} {窗口ID} {窗口名}（仅勾选后才会被替换）"></el-input>
+              </el-form-item>
+              <el-form-item label="补充变量">
+                <el-checkbox-group v-model="taskForm.ask_vars">
+                  <el-checkbox value="current_time">当前时间（替换「{当前时间}」）</el-checkbox>
+                  <el-checkbox value="current_date">当前日期（替换「{当前日期}」）</el-checkbox>
+                  <el-checkbox value="window_id">窗口ID（替换「{窗口ID}」）</el-checkbox>
+                  <el-checkbox value="window_name">窗口名（替换「{窗口名}」）</el-checkbox>
+                </el-checkbox-group>
+                <div class="muted">勾选后，发送时会把提示词里对应的占位符替换为实际值；不勾选则保留原文本不变</div>
+              </el-form-item>
+              <el-form-item v-if="taskForm.ask_platform==='doubao'" label="视频生成">
+                <el-switch v-model="taskForm.ask_video_mode"></el-switch>
+                <span class="muted" style="margin-left:8px">进入对话页后先点击豆包的「视频生成」模式 Tab，再发送提示词</span>
               </el-form-item>
               <el-form-item label="发送后等待(秒)">
                 <el-input-number v-model="taskForm.ask_wait" :min="5" :max="600"></el-input-number>
@@ -843,7 +856,7 @@ const app = createApp({
     const platformLabel = p => (platformList.find(x=>x.v===p) || {}).label || p;
     const blankTask = () => ({
       id:'', name:'', task_type:'video_publish', platform:'douyin', enabled:true, cron:'0 9 * * *',
-      ask_platform:'doubao', prompt_text:'', ask_wait:30, ask_daily_limit:1,
+      ask_platform:'doubao', prompt_text:'', ask_wait:30, ask_daily_limit:1, ask_vars:[], ask_video_mode:false,
       source_type:'doubao_page', source_url:'', source_window_id:'', source_wait:15,
       items_path:'data', field_title:'title', field_video:'video_url',
       fetch_count:1, ai_model_id:'', ai_prompt:'', allow_repeat:true,

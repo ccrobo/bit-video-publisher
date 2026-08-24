@@ -107,6 +107,8 @@ TASK_DEFAULTS = {
     "prompt_text": "",  # ai_ask: 要发送的提示词
     "ask_wait": 30,  # ai_ask: 发送后等待生成秒数
     "ask_daily_limit": 1,  # ai_ask: 每窗口每日提问上限, 0=不限制(AI根据回复判断今日已问次数)
+    "ask_vars": [],  # ai_ask: 提示词中补充的变量开关: current_time/current_date/window_id/window_name
+    "ask_video_mode": False,  # ai_ask: 豆包平台: 注入前切换到"视频生成"模式
     "source_type": "json",
     "source_url": "",
     "source_window_id": "",

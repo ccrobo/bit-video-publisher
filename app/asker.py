@@ -1,4 +1,5 @@
 """AI 提问任务: 在比特浏览器窗口中打开指定平台的对话框URL, 自动输入提示词并发送"""
+import datetime as dt
 import time
 
 from playwright.sync_api import sync_playwright
@@ -62,6 +63,79 @@ _FIND_SEND_JS = """
   return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
 }
 """
+
+# 定位豆包「视频生成」Tab/模式切换按钮: 优先返回其可点击的包裹元素坐标
+_FIND_VIDEO_MODE_JS = """
+() => {
+  const keywords = ['视频生成', '生成视频', '视频创作'];
+  const vis = el => {
+    if (!el || el.nodeType !== 1) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || 1) === 0) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 10 && r.height > 10 && r.left < window.innerWidth && r.top < window.innerHeight;
+  };
+  const hasText = (el, kws) => {
+    const t = (el.innerText || el.textContent || '').replace(/\s+/g, '').trim();
+    if (!t) return false;
+    for (const k of kws) if (t.includes(k)) return true;
+    return false;
+  };
+  // 候选: 带文字匹配的所有可见元素
+  const candidates = [...document.querySelectorAll('div, button, a, span, [role=tab], [role=button], li')]
+    .filter(el => vis(el) && hasText(el, keywords));
+  if (!candidates.length) return null;
+  // 找最小文本承载元素（叶子元素更精准），再往上找第一个可点击容器
+  candidates.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+  let el = candidates[0];
+  let anchor = el;
+  for (let depth = 0; depth < 10 && el && el !== document.body; depth++) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 20 && r.height > 20) { anchor = el; }
+    const cursor = window.getComputedStyle(el).cursor;
+    const role = el.getAttribute && (el.getAttribute('role') || '');
+    if (cursor === 'pointer' || el.tagName === 'BUTTON' || el.tagName === 'A'
+        || role === 'button' || role === 'tab' || (el.onclick != null)) {
+      const r2 = el.getBoundingClientRect();
+      if (r2.width > 20 && r2.height > 20) anchor = el;
+      break;
+    }
+    el = el.parentElement;
+  }
+  const r = anchor.getBoundingClientRect();
+  if (!(r.width > 10 && r.height > 10)) return null;
+  return { x: r.x + r.width / 2, y: r.y + r.height / 2, label: (anchor.innerText || '').trim().slice(0, 20) };
+}
+"""
+
+
+# ---------------- 提示词变量渲染 ----------------
+
+def render_prompt_vars(text, ask_vars, now=None, window=None):
+    """根据 ask_vars（开关列表）对提示词中的 {当前时间}/{当前日期}/{窗口ID}/{窗口名} 做替换。
+
+    未启用的变量不替换，保留占位符，避免意外覆盖用户字面文案。
+    now/dt 为注入的当前时间，不传则取 now=datetime.now()。
+    """
+    if not text:
+        return text or ""
+    ask_vars = set(ask_vars or [])
+    if not ask_vars:
+        return text
+    if now is None:
+        now = dt.datetime.now()
+    w = window or {}
+    mapping = {
+        "current_time": ("{当前时间}", now.strftime("%Y-%m-%d %H:%M:%S")),
+        "current_date": ("{当前日期}", now.strftime("%Y-%m-%d")),
+        "window_id": ("{窗口ID}", str(w.get("id") or "")),
+        "window_name": ("{窗口名}", str(w.get("name") or "")),
+    }
+    out = text
+    for key, (placeholder, value) in mapping.items():
+        if key in ask_vars and placeholder in out:
+            out = out.replace(placeholder, value)
+    return out
 
 
 def read_chat_text(bitclient, chat_url, window, settle_seconds=6):
@@ -132,8 +206,14 @@ def read_chat_text(bitclient, chat_url, window, settle_seconds=6):
             pass
 
 
-def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
-    """打开窗口的对话框URL并发送提示词; 返回 True 表示已发出"""
+def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30,
+                ask_vars=None, video_mode=False):
+    """打开窗口的对话框URL并发送提示词; 返回 True 表示已发出
+
+    - ask_vars: 开关列表, 支持 current_time / current_date / window_id / window_name
+      将把提示词里的 {当前时间}/{当前日期}/{窗口ID}/{窗口名} 替换为实际值后再发送
+    - video_mode: 豆包专用, 进入页面后先尝试点击 "视频生成" Tab/模式切换, 再注入提示词
+    """
     addr = bitclient.open_window(window["id"])
     cdp = addr if addr.startswith("http") else "http://" + addr
     pw = None
@@ -164,6 +244,28 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
         except Exception:
             pass
 
+        # [需求2] 豆包视频生成模式: 注入提示词前先切到 Tab
+        if video_mode:
+            vpos = None
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                try:
+                    vpos = page.evaluate(_FIND_VIDEO_MODE_JS)
+                except Exception:
+                    vpos = None
+                if vpos:
+                    break
+                time.sleep(1)
+            if vpos:
+                try:
+                    page.mouse.click(vpos["x"], vpos["y"])
+                    time.sleep(1.2)
+                    add_log(f"[{window['name']}] 已切换到豆包「{vpos.get('label') or '视频生成'}」模式")
+                except Exception as e:
+                    add_log(f"[{window['name']}] 切换视频生成模式失败({e})，继续按普通对话执行", "warning")
+            else:
+                add_log(f"[{window['name']}] 未找到豆包「视频生成」Tab，按普通对话执行（如首次使用可先手动切一次）", "warning")
+
         # 等待输入框出现
         pos = None
         deadline = time.time() + 20
@@ -178,10 +280,15 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
         if not pos:
             raise RuntimeError(f"窗口[{window['name']}] 页面未找到聊天输入框，请确认链接是平台对话页")
 
+        # [需求1] 提示词变量渲染（仅替换勾选的占位符）
+        final_prompt = render_prompt_vars(prompt, ask_vars or [], window=window)
+        if final_prompt != prompt:
+            add_log(f"[{window['name']}] 提示词已补充变量（启用项: {', '.join(sorted(set(ask_vars or [])))}），共 {len(final_prompt)} 字")
+
         # 注入提示词
         page.mouse.click(pos["x"], pos["y"])
         time.sleep(0.6)
-        page.keyboard.insert_text(prompt)
+        page.keyboard.insert_text(final_prompt)
         time.sleep(0.5)
         has_text = None
         try:
@@ -223,7 +330,7 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
                 raise RuntimeError(f"窗口[{window['name']}] 提示词发送失败，请检查页面状态")
 
         wait_s = max(5, int(wait_seconds or 30))
-        add_log(f"[{window['name']}] 已发送提示词（{len(prompt)}字），等待生成 {wait_s} 秒...")
+        add_log(f"[{window['name']}] 已发送提示词（{len(final_prompt)}字），等待生成 {wait_s} 秒...")
         time.sleep(wait_s)
         return True
     finally:
