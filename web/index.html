@@ -208,6 +208,7 @@
           <template #default="{row}">
             <el-button link type="success" size="small" @click="runTask(row)">立即执行</el-button>
             <el-button link type="primary" size="small" @click="editTask(row)">编辑</el-button>
+            <el-button link type="primary" size="small" @click="copyTask(row)">复制</el-button>
             <el-popconfirm title="确定删除该任务？" @confirm="delTask(row)">
               <template #reference><el-button link type="danger" size="small">删除</el-button></template>
             </el-popconfirm>
@@ -242,6 +243,12 @@
                 <div class="muted">各窗口需提前在该平台登录好；每个目标窗口配置自己的对话框URL</div>
               </el-form-item>
               <el-form-item label="提示词" required>
+                <el-select v-if="prompts.length" v-model="quickPick" clearable placeholder="从提示词库快捷填入（将覆盖下方内容）"
+                           style="width:100%; margin-bottom:8px" size="small" @change="applyQuickPrompt">
+                  <el-option-group v-for="g in groupedPrompts" :key="g.cat" :label="g.cat">
+                    <el-option v-for="p in g.items" :key="p.id" :label="(p.name || '未命名')" :value="p.id"></el-option>
+                  </el-option-group>
+                </el-select>
                 <el-input type="textarea" :rows="8" v-model="taskForm.prompt_text"
                           placeholder="输入要让AI执行的提示词，执行时将逐个窗口在其对话框中发送"></el-input>
               </el-form-item>
@@ -332,11 +339,10 @@
         <div v-show="isTargetStep">
           <el-form :model="taskForm" label-width="130px">
             <el-form-item label="目标分组">
-              <el-select v-model="taskForm.target_group_ids" multiple style="width:100%" placeholder="可选：筛选下方候选窗口"
-                         @change="onTaskGroupsChange">
+              <el-select v-model="taskForm.target_group_ids" multiple style="width:100%" placeholder="可选：筛选下方候选窗口">
                 <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id"></el-option>
               </el-select>
-              <div class="muted">选分组后，下方「目标窗口」仅显示组内窗口；不选则显示全部窗口</div>
+              <div class="muted">选分组后，下方「目标窗口」仅显示组内窗口；不选则显示全部。分组增删只影响候选列表，不会清除已勾选的窗口及其已填写的URL</div>
             </el-form-item>
             <el-form-item label="目标窗口">
               <el-select v-model="taskForm.target_window_ids" multiple style="width:100%" filterable placeholder="勾选要执行的窗口（需在窗口管理中开启）">
@@ -509,6 +515,57 @@
         <template #footer>
           <el-button @click="modelVisible=false">取消</el-button>
           <el-button type="primary" @click="saveModel">保存</el-button>
+        </template>
+      </el-dialog>
+    </el-tab-pane>
+
+    <!-- ================= 提示词库 ================= -->
+    <el-tab-pane label="提示词库" name="prompts">
+      <div class="toolbar">
+        <el-select v-model="promptCatFilter" clearable placeholder="按分类筛选" style="width:200px" size="small">
+          <el-option v-for="c in promptCategories" :key="c" :label="c" :value="c"></el-option>
+        </el-select>
+        <el-button type="primary" size="small" @click="newPrompt">+ 新建提示词</el-button>
+        <span class="muted">结构化归类管理常用提示词；在「发布任务 → AI提问」中可一键快捷填入</span>
+      </div>
+      <el-table :data="filteredPrompts" border stripe size="small">
+        <el-table-column prop="category" label="分类" width="150">
+          <template #default="{row}"><el-tag v-if="row.category" size="small">{{ row.category }}</el-tag><span v-else class="muted">未分类</span></template>
+        </el-table-column>
+        <el-table-column prop="name" label="名称" width="200" show-overflow-tooltip>
+          <template #default="{row}">{{ row.name || '未命名' }}</template>
+        </el-table-column>
+        <el-table-column prop="content" label="内容" show-overflow-tooltip></el-table-column>
+        <el-table-column prop="created_at" label="创建时间" width="170"></el-table-column>
+        <el-table-column label="操作" width="130" fixed="right">
+          <template #default="{row}">
+            <el-button link type="primary" size="small" @click="editPrompt(row)">编辑</el-button>
+            <el-popconfirm title="确定删除该提示词？" @confirm="delPrompt(row)">
+              <template #reference><el-button link type="danger" size="small">删除</el-button></template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-dialog v-model="promptVisible" :title="promptEditing ? '编辑提示词' : '新建提示词'" width="640px">
+        <el-form label-width="80px">
+          <el-form-item label="分类">
+            <el-select v-model="promptForm.category" filterable allow-create default-first-option clearable
+                       style="width:100%" placeholder="选择已有分类或输入新分类，可留空">
+              <el-option v-for="c in promptCategories" :key="c" :label="c" :value="c"></el-option>
+            </el-select>
+          </el-form-item>
+          <el-form-item label="名称">
+            <el-input v-model="promptForm.name" placeholder="例如：每日热点问题生成"></el-input>
+          </el-form-item>
+          <el-form-item label="内容" required>
+            <el-input type="textarea" :rows="10" v-model="promptForm.content"
+                      placeholder="提示词正文，支持多行"></el-input>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="promptVisible=false">取消</el-button>
+          <el-button type="primary" @click="savePrompt">保存</el-button>
         </template>
       </el-dialog>
     </el-tab-pane>
@@ -864,6 +921,56 @@ const app = createApp({
     }
     const modelName = id => (models.value.find(m=>m.id===id) || {}).name || '未选择';
     const defaultPromptPreview = computed(() => (form.default_ai_prompt || '').slice(0, 300));
+    // ------- 提示词库 -------
+    const prompts = ref([]);
+    const promptVisible = ref(false);
+    const promptEditing = ref(null);
+    const promptCatFilter = ref('');
+    const quickPick = ref('');
+    const promptForm = reactive({ name:'', category:'', content:'' });
+    async function loadPrompts(){ try { prompts.value = (await api('/api/prompts')).prompts; } catch(e){} }
+    const promptCategories = computed(() => Array.from(new Set(prompts.value.map(p => p.category).filter(Boolean))));
+    const filteredPrompts = computed(() => {
+      const f = promptCatFilter.value;
+      return f ? prompts.value.filter(p => (p.category || '') === f) : prompts.value;
+    });
+    const groupedPrompts = computed(() => {
+      const map = {};
+      (prompts.value || []).forEach(p => { const c = p.category || '未分类'; (map[c] = map[c] || []).push(p); });
+      return Object.keys(map).sort().map(cat => ({ cat, items: map[cat] }));
+    });
+    function newPrompt(){
+      promptEditing.value = null;
+      Object.assign(promptForm, { name:'', category: promptCatFilter.value || '', content:'' });
+      promptVisible.value = true;
+    }
+    function editPrompt(p){
+      promptEditing.value = p;
+      Object.assign(promptForm, { name:p.name||'', category:p.category||'', content:p.content||'' });
+      promptVisible.value = true;
+    }
+    async function savePrompt(){
+      if(!promptForm.content.trim()){ ElementPlus.ElMessage.warning('请填写提示词内容'); return; }
+      const body = { name:promptForm.name.trim(), category:promptForm.category.trim(), content:promptForm.content };
+      try {
+        if(promptEditing.value) await api(`/api/prompts/${promptEditing.value.id}`, { method:'PUT', body:JSON.stringify(body) });
+        else await api('/api/prompts', { method:'POST', body:JSON.stringify(body) });
+        promptVisible.value = false;
+        await loadPrompts();
+        ElementPlus.ElMessage.success('提示词已保存');
+      } catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
+    }
+    async function delPrompt(p){
+      try { await api(`/api/prompts/${p.id}`, { method:'DELETE' }); loadPrompts(); ElementPlus.ElMessage.success('已删除'); }
+      catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
+    }
+    function applyQuickPrompt(pid){
+      const p = (prompts.value || []).find(x => x.id === pid);
+      quickPick.value = '';
+      if (!p) return;
+      taskForm.prompt_text = p.content;
+      ElementPlus.ElMessage.success(`已填入「${p.name || '未命名'}」`);
+    }
     // 任务弹窗中豆包模式的实际生效目标(仅显式勾选的窗口)
     const taskTargets = computed(() => {
       const ids = new Set(taskForm.target_window_ids || []);
@@ -875,11 +982,6 @@ const app = createApp({
       if (!gids.size) return windows.value || [];
       return (windows.value || []).filter(w => gids.has(w.group_id));
     });
-    function onTaskGroupsChange(){
-      // 分组变化后, 清掉不在候选范围内的已选窗口
-      const ok = new Set((taskWindowOptions.value || []).map(w => w.id));
-      taskForm.target_window_ids = (taskForm.target_window_ids || []).filter(id => ok.has(id));
-    }
     function setWinVar(id, v) {
       if (!taskForm.window_vars) taskForm.window_vars = {};
       const cur = Object.assign({}, taskForm.window_vars[id] || {});
@@ -887,13 +989,18 @@ const app = createApp({
       if (!cur.source_url && !cur.remark) delete taskForm.window_vars[id];
       else taskForm.window_vars[id] = cur;
     }
-    function newTask(){ Object.assign(taskForm, blankTask()); step.value = 0; taskVisible.value = true; loadModels(); }
+    function newTask(){ Object.assign(taskForm, blankTask()); step.value = 0; taskVisible.value = true; loadModels(); loadPrompts(); }
     function editTask(row){
       Object.assign(taskForm, blankTask(), JSON.parse(JSON.stringify(row)));
       if (!taskForm.window_vars) taskForm.window_vars = {};
       step.value = 0;
       taskVisible.value = true;
       loadModels();
+    }
+    function copyTask(row){
+      editTask(row);
+      taskForm.id = '';
+      taskForm.name = row.name + ' - 副本';
     }
     function validateStep(s){
       if(!taskForm.name){ ElementPlus.ElMessage.warning('请填写任务名称'); return false; }
@@ -998,6 +1105,7 @@ const app = createApp({
       if (name === 'tasks') { loadTasks(); }
       if (name === 'settings') loadSettings();
       if (name === 'ai') { loadModels(); }
+      if (name === 'prompts') { loadPrompts(); }
       if (name === 'windows' && !windows.value.length) syncAll();
     }
 
@@ -1017,11 +1125,13 @@ const app = createApp({
       refreshStatus, startBit, syncAll, filteredWindows, pagedWindows, currentGroupName,
       openWin, closeWin, cfgVisible, cfgRow, cfgForm, editCfg, saveCfg, toggleCfg,
       batchVisible, batchForm, applyBatch, tmap, taskName,
-      taskVisible, taskForm, newTask, editTask, saveTask, delTask, toggleTask, runTask, taskTargets, taskWindowOptions, onTaskGroupsChange, setWinVar,
+      taskVisible, taskForm, newTask, editTask, copyTask, saveTask, delTask, toggleTask, runTask, taskTargets, taskWindowOptions, setWinVar,
       step, nextStep, prevStep, platformList, platformLabel,
       isAsk, wizardSteps, lastStep, isTargetStep, winUrlLabel, askPlatformList, taskTypeList, switchTaskType,
       models, modelVisible, modelEditing, testing, modelForm, newModel, editModel, saveModel, delModel, toggleModel, testModel, modelName,
       defaultPromptPreview, loadModels,
+      prompts, promptVisible, promptEditing, promptCatFilter, quickPick, promptForm,
+      loadPrompts, promptCategories, filteredPrompts, groupedPrompts, newPrompt, editPrompt, savePrompt, delPrompt, applyQuickPrompt,
       loadTasks, loadSettings, saveSettings, pollLogs, clearLogView, onTab,
     };
   }

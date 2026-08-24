@@ -320,6 +320,44 @@ def model_test(mid: str):
     return {"ok": True, "reply": reply}
 
 
+# ---------------- 提示词库 ----------------
+
+PROMPT_EDITABLE = {"name", "category", "content"}
+
+
+@app.get("/api/prompts")
+def get_prompts():
+    return {"prompts": store.list_prompts()}
+
+
+@app.post("/api/prompts")
+def add_prompt(body: dict = Body(...)):
+    data = {k: str(body.get(k) or "").strip() for k in PROMPT_EDITABLE}
+    if not data["content"]:
+        raise HTTPException(400, "提示词内容不能为空")
+    p = store.upsert_prompt(data)
+    add_log(f"已添加提示词[{p['name'] or '未命名'}]")
+    return p
+
+
+@app.put("/api/prompts/{pid}")
+def update_prompt(pid: str, body: dict = Body(...)):
+    if not store.get_prompt(pid):
+        raise HTTPException(404, "提示词不存在")
+    data = {k: str(v).strip() for k, v in body.items() if k in PROMPT_EDITABLE}
+    if "content" in data and not data["content"]:
+        raise HTTPException(400, "提示词内容不能为空")
+    p = store.upsert_prompt({"id": pid, **data})
+    add_log(f"提示词[{p['name'] or '未命名'}] 已更新")
+    return p
+
+
+@app.delete("/api/prompts/{pid}")
+def remove_prompt(pid: str):
+    store.delete_prompt(pid)
+    return {"ok": True}
+
+
 # ---------------- 窗口配置 ----------------
 
 @app.get("/api/window-configs")

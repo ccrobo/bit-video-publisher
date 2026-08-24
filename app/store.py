@@ -1,8 +1,9 @@
-"""基于 JSON 文件的持久化存储: 设置 / 任务 / 窗口配置 / AI模型 / 运行状态"""
+"""基于 JSON 文件的持久化存储: 设置 / 任务 / 窗口配置 / AI模型 / 提示词库 / 运行状态"""
 import copy
 import json
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -236,6 +237,42 @@ MODEL_DEFAULTS = {
 def delete_model(mid):
     ms = [m for m in list_models() if m.get("id") != mid]
     save_models(ms)
+    return True
+
+
+# ---------------- 提示词库 ----------------
+
+def list_prompts():
+    return _read("prompts.json", [])
+
+
+def get_prompt(pid):
+    for p in list_prompts():
+        if p.get("id") == pid:
+            return copy.deepcopy(p)
+    return None
+
+
+def upsert_prompt(patch):
+    ps = list_prompts()
+    pid = patch.get("id") or ""
+    for i, p in enumerate(ps):
+        if p.get("id") == pid:
+            ps[i].update({k: v for k, v in patch.items() if k != "id"})
+            _write("prompts.json", ps)
+            return copy.deepcopy(ps[i])
+    p = {"name": "", "category": "", "content": ""}
+    p.update({k: v for k, v in (patch or {}).items() if k != "id"})
+    p["id"] = new_id()
+    p["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    ps.append(p)
+    _write("prompts.json", ps)
+    return copy.deepcopy(p)
+
+
+def delete_prompt(pid):
+    ps = [p for p in list_prompts() if p.get("id") != pid]
+    _write("prompts.json", ps)
     return True
 
 
