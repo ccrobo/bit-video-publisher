@@ -106,3 +106,38 @@ def refine_content(model_cfg, platform, material, extra_prompt=""):
     text = chat(model_cfg, "\n\n".join(parts), system=system)
     add_log(f"AI整理: 模型[{model_cfg.get('name')}] 已返回结果")
     return parse_content_json(text)
+
+
+COUNT_SYSTEM = "你是严谨的数据统计助手，只输出符合要求的JSON，不要输出任何其他内容。"
+
+
+def count_replies_on_date(model_cfg, page_text, date_str):
+    """统计对话页文本中指定日期生成的AI回复条数(依据【生成时间】等标记推理)"""
+    mat = (page_text or "").strip()
+    if not mat:
+        return 0
+    prompt = f"""以下是一个AI对话页面(chat页)的可见文本。其中AI的回复通常带有生成时间标记，格式如：【生成时间】2026-08-24 16:30:00。
+
+请统计「生成时间」日期为 {date_str} 的回复条数。
+
+要求：
+1. 只统计AI回复上的生成时间，不要把用户消息、其他日期或正文里出现的数字算进去；
+2. 若整个页面没有任何时间标记或无法确定，count 返回 0；
+3. 只输出JSON：{{"count": 条数}}
+
+——以下是页面文本——
+""" + mat[:6000]
+    text = chat(model_cfg, prompt, system=COUNT_SYSTEM, timeout=60)
+    t = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.S).strip()
+    m = re.search(r"\{.*\}", t, flags=re.S)
+    if not m:
+        raise LLMError("模型未返回JSON")
+    try:
+        obj = json.loads(m.group(0))
+        n = int(obj.get("count") or 0)
+    except LLMError:
+        raise
+    except Exception as e:
+        raise LLMError(f"计数结果解析失败: {e}") from e
+    add_log(f"AI计数: 模型[{model_cfg.get('name')}] 判定 {date_str} 已有回复 {n} 条")
+    return max(0, n)

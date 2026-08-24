@@ -64,6 +64,74 @@ _FIND_SEND_JS = """
 """
 
 
+def read_chat_text(bitclient, chat_url, window, settle_seconds=6):
+    """打开窗口的对话框URL读取页面可见文本(不发送任何内容)。
+
+    用于AI提问任务在发送前让推理模型判断今日已提问次数。"""
+    addr = bitclient.open_window(window["id"])
+    cdp = addr if addr.startswith("http") else "http://" + addr
+    pw = None
+    page = None
+    browser = None
+    ctx = None
+    try:
+        add_log(f"[{window['name']}] 正在打开对话页检查今日提问情况: {chat_url}")
+        pw = sync_playwright().start()
+        browser = pw.chromium.connect_over_cdp(cdp, timeout=30000)
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = ctx.new_page()
+        page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=20000)
+        except Exception:
+            pass
+        cur = page.url or ""
+        if "/login" in cur or "passport" in cur:
+            raise RuntimeError(f"窗口[{window['name']}] 未登录该平台，请先在该窗口手动登录")
+        try:
+            body_txt = page.evaluate("() => document.body.innerText") or ""
+            if ("扫码登录" in body_txt or "验证码登录" in body_txt or "手机号登录" in body_txt):
+                raise RuntimeError(f"窗口[{window['name']}] 未登录该平台，请先在该窗口手动登录")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        time.sleep(max(3, int(settle_seconds)))
+        try:
+            return page.evaluate("() => document.body.innerText") or ""
+        except Exception:
+            return ""
+    finally:
+        if page is not None:
+            try:
+                page.close(timeout=5000)
+            except Exception:
+                pass
+        try:
+            src = (chat_url or "").rstrip("/")
+            for p in list(ctx.pages):
+                u = (p.url or "")
+                if src and u.rstrip("/") == src:
+                    p.close(timeout=5000)
+        except Exception:
+            pass
+        if pw is not None:
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass
+            try:
+                pw.stop()
+            except Exception:
+                pass
+        try:
+            bitclient.close_window(window["id"])
+            add_log(f"[{window['name']}] 对话页读取完成，窗口已关闭")
+        except Exception:
+            pass
+
+
 def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30):
     """打开窗口的对话框URL并发送提示词; 返回 True 表示已发出"""
     addr = bitclient.open_window(window["id"])

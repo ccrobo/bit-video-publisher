@@ -302,8 +302,11 @@ def run_task(task_id, only_window_id=None):
 
 
 def run_ai_ask(task, bit, settings, targets):
-    """AI提问任务: 逐窗口打开各自的对话框URL发送提示词"""
-    from .asker import ask_in_chat
+    """AI提问任务: 逐窗口打开各自的对话框URL发送提示词(可按日限次, AI判断今日已问次数)"""
+    import datetime as dt
+
+    from .asker import ask_in_chat, read_chat_text
+    from .llm import count_replies_on_date
 
     name = task.get("name") or task.get("id")
     prompt = (task.get("prompt_text") or "").strip()
@@ -313,13 +316,40 @@ def run_ai_ask(task, bit, settings, targets):
     platform = task.get("ask_platform") or "doubao"
     wvars = task.get("window_vars") or {}
     wait_s = int(task.get("ask_wait") or 30)
+    limit = int(task.get("ask_daily_limit") or 0)
+    model = None
+    if limit > 0:
+        model = _pick_model(task)
+        if not model:
+            add_log(f"[{name}] 已设每日提问上限({limit})但无可用推理模型，本次不做次数限制", "warning")
+    today = dt.date.today().isoformat()
     ok_cnt, fail_cnt = 0, 0
-    add_log(f"[{name}] AI提问模式: 平台[{platform}], 目标 {len(targets)} 个窗口")
+    add_log(
+        f"[{name}] AI提问模式: 平台[{platform}], 目标 {len(targets)} 个窗口"
+        + (f", 每日上限 {limit} 次/窗口" if limit > 0 else "")
+    )
     for w in targets:
         src = ((wvars.get(w["id"]) or {}).get("source_url") or "").strip()
         if not src:
             add_log(f"[{name}] 窗口[{w['name']}] 未配置对话框URL，跳过（每个目标窗口必须有自己的链接）", "error")
             continue
+        if limit > 0 and model:
+            # 发送前打开对话页取文本, 由推理模型判断今日已提问次数
+            try:
+                page_text = read_chat_text(bit, src, w)
+            except Exception as e:
+                add_log(f"[{name}] 窗口[{w['name']}] 读取对话页失败({e})，本次不做次数检查", "warning")
+                page_text = ""
+            asked = 0
+            if page_text:
+                try:
+                    asked = count_replies_on_date(model, page_text, today)
+                except Exception as e:
+                    add_log(f"[{name}] 窗口[{w['name']}] AI计数失败({e})，按0次处理", "warning")
+            add_log(f"[{name}] 窗口[{w['name']}] 今日已提问 {asked}/{limit} 次")
+            if asked >= limit:
+                add_log(f"[{name}] 窗口[{w['name']}] 今日已达提问上限({limit})，跳过")
+                continue
         try:
             ask_in_chat(bit, settings, src, w, prompt, wait_s)
             ok_cnt += 1

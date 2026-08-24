@@ -105,6 +105,7 @@ TASK_DEFAULTS = {
     "ask_platform": "doubao",  # ai_ask: 提问平台
     "prompt_text": "",  # ai_ask: 要发送的提示词
     "ask_wait": 30,  # ai_ask: 发送后等待生成秒数
+    "ask_daily_limit": 1,  # ai_ask: 每窗口每日提问上限, 0=不限制(AI根据回复判断今日已问次数)
     "source_type": "json",
     "source_url": "",
     "source_window_id": "",

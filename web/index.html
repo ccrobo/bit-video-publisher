@@ -25,6 +25,7 @@
   .log-line .t { color: #5d6a7a; margin-right: 8px; }
   .log-line.err { color: #ff7875; } .log-line.warn { color: #ffc53d; } .log-line.info { color: #95de64; }
   .muted { color: #909399; font-size: 12px; }
+  .cron-err { color: #f56c6c; font-size: 12px; }
   .plat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
   .plat-card { border: 2px solid #e4e7ed; border-radius: 10px; padding: 18px 8px; text-align: center; cursor: pointer; transition: all .15s; user-select: none; }
   .plat-card:hover { border-color: #b1d2ff; }
@@ -248,6 +249,14 @@
                 <el-input-number v-model="taskForm.ask_wait" :min="5" :max="600"></el-input-number>
                 <span class="muted" style="margin-left:8px">发送提示词后保持窗口打开的秒数，供AI开始生成</span>
               </el-form-item>
+              <el-form-item label="推理模型">
+                <el-select v-model="taskForm.ai_model_id" style="width:100%" placeholder="设置每日提问上限时必选" clearable>
+                  <el-option v-for="m in models.filter(x=>x.enabled)" :key="m.id"
+                             :label="m.name + (m.has_key ? '' : '（未配置Key）')" :value="m.id"
+                             :disabled="!m.has_key"></el-option>
+                </el-select>
+                <div class="muted">设置「每日提问上限」后，执行前将打开各窗口对话页抓取回复内容，由该模型依据回复中的【生成时间】等标记判断今日已提问几次；未选择模型时不做次数限制</div>
+              </el-form-item>
             </template>
 
             <!-- 视频发布: 内容源 -->
@@ -344,9 +353,13 @@
             </template>
             <el-row :gutter="12">
               <el-col :span="12"><el-form-item label="执行周期 cron">
-                <el-select v-model="taskForm.cron" filterable allow-create default-first-option style="width:100%">
+                <el-select v-model="taskForm.cron" filterable allow-create default-first-option style="width:100%" @change="cronDescCheck">
                   <el-option v-for="c in cronPresets" :key="c.v" :label="c.l + ' (' + c.v + ')'" :value="c.v"></el-option>
-                </el-select></el-form-item></el-col>
+                </el-select>
+                <div v-if="taskForm.cron" :class="cronDesc ? 'muted' : 'cron-err'">
+                  {{ cronDesc ? '⏱ 含义：' + cronDesc : '✗ 无法识别的 cron 表达式，请检查格式（5段：分 时 日 月 周）' }}
+                </div>
+              </el-form-item></el-col>
               <el-col :span="12"><el-form-item label="是否启用">
                 <el-switch v-model="taskForm.enabled"></el-switch>
                 <div class="muted">开启后按 cron 定时自动执行</div></el-form-item></el-col>
@@ -368,10 +381,14 @@
                 </el-select></el-form-item></el-col>
             </el-row>
             </template>
+            <el-row v-if="taskForm.task_type==='ai_ask'" :gutter="12">
+              <el-col :span="8"><el-form-item label="每日提问上限">
+                <el-input-number v-model="taskForm.ask_daily_limit" :min="0" :max="50" style="width:100%"></el-input-number>
+                <div class="muted">每个窗口每天最多提问次数，0 表示不限制；需在第1步选择推理模型</div>
+              </el-form-item></el-col>
+            </el-row>
           </el-form>
         </div>
-
-        <template #footer>
           <el-button v-if="step>0" @click="prevStep">上一步</el-button>
           <el-button v-if="step<lastStep" type="primary" @click="nextStep">下一步</el-button>
           <el-button v-if="step===lastStep" type="primary" @click="saveTask">保存任务</el-button>
@@ -548,6 +565,96 @@ const app = createApp({
       { l:'工作日 12:00', v:'0 12 * * 1-5' },
     ];
 
+    // ------- cron 自然语言翻译 -------
+    function cronExpand(f, min, max){
+      f = String(f == null ? '' : f).trim();
+      const out = new Set();
+      for (const part of f.split(',')) {
+        if (!part) return null;
+        let seg = part, stepN = 1;
+        if (part.includes('/')) {
+          const i = part.indexOf('/');
+          seg = part.slice(0, i);
+          stepN = parseInt(part.slice(i + 1), 10);
+          if (!stepN || stepN < 1) return null;
+        }
+        let lo, hi;
+        if (seg === '*') { lo = min; hi = max; }
+        else if (/^\d+$/.test(seg)) {
+          lo = parseInt(seg, 10); hi = part.includes('/') ? max : lo;
+        }
+        else if (/^\d+-\d+$/.test(seg)) {
+          const p2 = seg.split('-');
+          lo = parseInt(p2[0], 10); hi = parseInt(p2[1], 10);
+        }
+        else return null;
+        if (!(lo >= min && hi <= max && lo <= hi)) return null;
+        for (let x = lo; x <= hi; x += stepN) out.add(x);
+      }
+      return Array.from(out).sort((a, b) => a - b);
+    }
+    function describeCron(expr){
+      try {
+        const t = String(expr || '').trim().replace(/\s+/g, ' ');
+        if (!t || !/^[\d*,\-\/ ]+$/.test(t)) return null;
+        const fs = t.split(' ');
+        if (fs.length !== 5) return null;
+        const mi = cronExpand(fs[0], 0, 59), hh = cronExpand(fs[1], 0, 23),
+              dom = cronExpand(fs[2], 1, 31), mon = cronExpand(fs[3], 1, 12),
+              dow = cronExpand(fs[4], 0, 7);
+        if (!mi || !hh || !dom || !mon || !dow) return null;
+        const dows = Array.from(new Set(dow.map(v => v === 7 ? 0 : v))).sort((a, b) => a - b);
+        const pad2 = n => String(n).padStart(2, '0');
+
+        // 时间描述(分钟+小时)
+        let timeDesc = '';
+        if (hh.length === 24 && mi.length === 60) timeDesc = '每分钟';
+        else if (mi.length > 1) {
+          const stM = mi[1] - mi[0];
+          const reg = stM > 1 && mi.every((v, i) => i === 0 || v - mi[i - 1] === stM) && mi[mi.length - 1] + stM > 59;
+          timeDesc = reg ? `每 ${stM} 分钟`
+            : `每小时的第 ${mi.slice(0, 6).join('、')}${mi.length > 6 ? ' 等' : ''} 分`;
+        }
+        else if (hh.length === 24) timeDesc = `每小时第 ${pad2(mi[0])} 分`;
+        else {
+          const mm = pad2(mi[0]);
+          if (hh.length === 1) timeDesc = `${pad2(hh[0])}:${mm}`;
+          else {
+            const stH = hh[1] - hh[0];
+            const reg = stH > 1 && hh.every((v, i) => i === 0 || v - hh[i - 1] === stH);
+            const list = hh.slice(0, 4).map(x => pad2(x) + ':' + mm).join('、');
+            timeDesc = reg ? `每 ${stH} 小时（${list}${hh.length > 4 ? '…' : ''}）`
+              : `在 ${list}${hh.length > 4 ? ' 等' : ''}`;
+          }
+        }
+
+        // 日期描述(日/周/月)
+        const domFull = dom.length === 31 && dom[0] === 1;
+        const monFull = mon.length === 12 && mon[0] === 1;
+        const dowFull = dows.length === 7;
+        const wkNames = ['周日','周一','周二','周三','周四','周五','周六'];
+        let dowDesc = '', domDesc = '';
+        if (!dowFull) {
+          dowDesc = (dows.join() === '1,2,3,4,5') ? '工作日（周一至周五）'
+            : '每' + dows.map(v => wkNames[v]).join('、');
+        }
+        if (!domFull) {
+          domDesc = dom.length === 1 ? `每月 ${dom[0]} 号`
+            : `每月 ${dom.slice(0, 5).join('、')}${dom.length > 5 ? ' 等' : ''} 号`;
+        }
+        let dayDesc = '';
+        if (dowDesc && domDesc) dayDesc = `${domDesc}，且限${dowDesc.replace(/^每/, '')}`;
+        else dayDesc = domDesc || dowDesc;
+
+        let head;
+        if (!monFull) head = `${mon.join('、')} 月` + (dayDesc ? ` 的 ${dayDesc.replace(/^每月 /, '')}` : ' 每天执行');
+        else head = dayDesc || '每天';
+        // "每 2 小时"这类时间本身含频率时不再冠以"每天"
+        if (head === '每天' && /^每/.test(timeDesc)) return timeDesc;
+        return head + ' ' + timeDesc;
+      } catch (e) { return null; }
+    }
+
     // ------- api -------
     async function api(url, opt) {
       const r = await fetch(url, Object.assign({ headers:{'Content-Type':'application/json'} }, opt||{}));
@@ -679,7 +786,7 @@ const app = createApp({
     const platformLabel = p => (platformList.find(x=>x.v===p) || {}).label || p;
     const blankTask = () => ({
       id:'', name:'', task_type:'video_publish', platform:'douyin', enabled:true, cron:'0 9 * * *',
-      ask_platform:'doubao', prompt_text:'', ask_wait:30,
+      ask_platform:'doubao', prompt_text:'', ask_wait:30, ask_daily_limit:1,
       source_type:'doubao_page', source_url:'', source_window_id:'', source_wait:15,
       items_path:'data', field_title:'title', field_video:'video_url',
       fetch_count:1, ai_model_id:'', ai_prompt:'', allow_repeat:true,
@@ -810,8 +917,14 @@ const app = createApp({
     function nextStep(){ if(validateStep(step.value)) step.value = Math.min(lastStep.value, step.value + 1); }
     function prevStep(){ step.value = Math.max(0, step.value - 1); }
 
+    const cronDesc = computed(() => describeCron(taskForm.cron));
+    function cronDescCheck(v){
+      if (v && !describeCron(v)) ElementPlus.ElMessage.warning('无法识别的 cron 表达式，请检查格式（5段：分 时 日 月 周）');
+    }
+
     async function saveTask() {
       for(let s=0;s<lastStep.value;s++){ if(!validateStep(s)) return; }
+      if (!describeCron(taskForm.cron)) { ElementPlus.ElMessage.warning('执行周期 cron 表达式无效，请检查格式（5段：分 时 日 月 周）'); return; }
       const needWinUrls = taskForm.task_type === 'ai_ask' || taskForm.source_type === 'doubao_page';
       if (needWinUrls) {
         const missing = taskTargets.value.filter(tw => !(taskForm.window_vars[tw.id] && taskForm.window_vars[tw.id].source_url));
@@ -900,6 +1013,7 @@ const app = createApp({
     return {
       tab, status, groups, windows, tasks, syncing, groupFilter, keyword, pageNo, pageSize,
       selected, logEntries, logBox, logAutoScroll, settingsLoaded, form, cronPresets, defaultBitPath,
+      cronDesc, cronDescCheck,
       refreshStatus, startBit, syncAll, filteredWindows, pagedWindows, currentGroupName,
       openWin, closeWin, cfgVisible, cfgRow, cfgForm, editCfg, saveCfg, toggleCfg,
       batchVisible, batchForm, applyBatch, tmap, taskName,
