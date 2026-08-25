@@ -103,6 +103,17 @@ def _finish_rec(state, rec, ok, err=None):
     store.save_state(state)
 
 
+def gate_targets_by_enabled(targets, configs):
+    """窗口[抓取发布]开关门禁: 未开启的窗口不参与任务执行。
+
+    返回 (通过列表, 被跳过列表); 配置缺失或缺 enabled 字段均视为未开启。
+    """
+    ok = [w for w in targets if bool((configs.get(w["id"]) or {}).get("enabled"))]
+    ok_ids = {w["id"] for w in ok}
+    skipped = [w for w in targets if w["id"] not in ok_ids]
+    return ok, skipped
+
+
 def run_task(task_id, only_window_id=None):
     task = store.get_task(task_id)
     if not task:
@@ -143,6 +154,16 @@ def run_task(task_id, only_window_id=None):
             return
     else:
         targets = [w for w in resolve_targets(task, windows, configs) if (not only_window_id or w["id"] == only_window_id)]
+
+    # 窗口[抓取发布]开关门禁: 未开启的窗口不执行任务
+    if targets:
+        targets, skipped = gate_targets_by_enabled(targets, configs)
+        if skipped:
+            names = "、".join((w.get("name") or w["id"]) for w in skipped)
+            add_log(f"[{name}] 跳过未开启[抓取发布]的窗口: {names}", "warning")
+        if only_window_id and not targets:
+            add_log(f"[{name}] 指定的窗口未开启[抓取发布]，已取消执行（请在【窗口管理】开启后再试）", "error")
+            return
 
     # AI提问任务: 独立流程(打开对话框URL发送提示词)
     if task.get("task_type") == "ai_ask":

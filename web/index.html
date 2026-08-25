@@ -270,6 +270,20 @@
         </el-table-column>
       </el-table>
 
+      <el-dialog v-model="runSelVisible" title="立即执行" width="500">
+        <div style="margin-bottom:12px;color:#909399;font-size:13px;line-height:1.6">
+          任务【{{ runSelRow && runSelRow.name }}】关联 {{ runSelTargets.length }} 个窗口（按变量「{{ runSelRow && runSelRow.url_var }}」匹配）。<br/>
+          可不选，直接执行全部；也可只指定其中一个窗口执行。
+        </div>
+        <el-select v-model="runSelWinId" placeholder="全部关联窗口" clearable filterable style="width:100%">
+          <el-option v-for="t in runSelTargets" :key="t.id" :label="`${t.name}（${t.value}）`" :value="t.id"></el-option>
+        </el-select>
+        <template #footer>
+          <el-button @click="runSelVisible=false">取消</el-button>
+          <el-button type="success" @click="confirmRun">{{ runSelWinId ? '仅执行该窗口' : '执行全部窗口' }}</el-button>
+        </template>
+      </el-dialog>
+
       <el-dialog v-model="taskVisible" :title="taskForm.id ? '编辑任务' : '新建任务'" width="760" top="3vh" :close-on-click-modal="false">
         <el-steps :active="step" finish-status="success" simple style="margin-bottom:20px">
           <el-step v-for="(st,i) in wizardSteps" :key="i" :title="st"></el-step>
@@ -1189,9 +1203,36 @@ const app = createApp({
       try { await api(`/api/tasks/${row.id}/toggle`, { method:'POST', body:JSON.stringify({enabled:v}) }); }
       catch(e) { row.enabled = !v; ElementPlus.ElMessage.error(String(e.message||e)); }
     }
+    const runSelVisible = ref(false);
+    const runSelRow = ref(null);
+    const runSelWinId = ref('');
+    const runSelTargets = ref([]);
+    function taskTargetsOf(row){
+      const k = (row.url_var || '').trim();
+      if (!k) return [];
+      return (windows.value || [])
+        .filter(w => ((winVars.value[w.id] || {})[k] || '').trim())
+        .map(w => ({ id: w.id, name: w.name || w.id, value: (winVars.value[w.id] || {})[k] }));
+    }
     async function runTask(row) {
+      runSelRow.value = row;
+      if (!(windows.value || []).length) await syncAll(true);
+      runSelTargets.value = taskTargetsOf(row);
+      if (!runSelTargets.value.length) {
+        ElementPlus.ElMessage.warning(`没有窗口配置了变量「${row.url_var}」，请到【窗口管理→配置】为各窗口填写`);
+        return;
+      }
+      runSelWinId.value = '';
+      loadWinVars();
+      runSelVisible.value = true;
+    }
+    async function confirmRun() {
+      const row = runSelRow.value;
+      if (!row) return;
       try {
-        const j = await api(`/api/tasks/${row.id}/run`, { method:'POST', body:'{}' });
+        const body = runSelWinId.value ? { window_id: runSelWinId.value } : {};
+        const j = await api(`/api/tasks/${row.id}/run`, { method:'POST', body: JSON.stringify(body) });
+        runSelVisible.value = false;
         ElementPlus.ElMessage.success(j.msg || '已在后台执行');
         tab.value = 'logs';
       } catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
@@ -1255,6 +1296,7 @@ const app = createApp({
       batchVisible, batchForm, applyBatch, tmap, taskName,
       taskVisible, taskForm, newTask, editTask, copyTask, saveTask, delTask, toggleTask, runTask,
       winVarKeys, varTargets, varCount, loadWinVars,
+      runSelVisible, runSelRow, runSelWinId, runSelTargets, confirmRun,
       varDefs, varDefVisible, vdForm, openVarDefs, saveVarDef, editVarDef, delVarDef, resetVdForm, varDefOptions, varDefNote, loadVarDefs,
       step, nextStep, prevStep, platformList, platformLabel,
       isAsk, wizardSteps, lastStep, isTargetStep, askPlatformList, taskTypeList, switchTaskType, winVarsSummary,
