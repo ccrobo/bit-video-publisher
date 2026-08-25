@@ -86,6 +86,12 @@
         <el-table-column prop="name" label="窗口名称" min-width="160" show-overflow-tooltip></el-table-column>
         <el-table-column prop="group_name" label="所属分组" width="140" show-overflow-tooltip></el-table-column>
         <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip></el-table-column>
+        <el-table-column label="窗口变量" min-width="170" show-overflow-tooltip>
+          <template #default="{row}">
+            <span v-if="row.wvars && Object.keys(row.wvars).length">{{ winVarsSummary(row.wvars) }}</span>
+            <span v-else class="muted">未配置</span>
+          </template>
+        </el-table-column>
         <el-table-column label="抓取发布" width="96">
           <template #default="{row}">
             <el-switch v-model="row.cfg.enabled" @change="v=>toggleCfg(row,v)"></el-switch>
@@ -123,6 +129,17 @@
             <el-select v-model="cfgForm.task_ids" multiple placeholder="选择该窗口要执行的任务" style="width:100%">
               <el-option v-for="t in tasks" :key="t.id" :label="t.name" :value="t.id"></el-option>
             </el-select>
+          </el-form-item>
+          <el-form-item label="窗口变量">
+            <div style="width:100%">
+              <div v-for="(vr,i) in cfgForm.var_rows" :key="i" style="display:flex;gap:6px;margin-bottom:6px">
+                <el-input v-model="vr.key" placeholder="变量名" style="width:150px"></el-input>
+                <el-input v-model="vr.value" placeholder="值，如 https://www.doubao.com/chat/xxxx"></el-input>
+                <el-button link type="danger" @click="cfgForm.var_rows.splice(i,1)">删除</el-button>
+              </div>
+              <el-button size="small" @click="cfgForm.var_rows.push({key:'',value:''})">+ 添加变量</el-button>
+              <div class="muted">任意 key=value；任务里按变量名引用（如「对话框URL」），执行时自动取各窗口该变量的值。删除所有行并保存即清空</div>
+            </div>
           </el-form-item>
           <el-form-item label="备注">
             <el-input v-model="cfgForm.note" placeholder="选填"></el-input>
@@ -195,7 +212,10 @@
         <el-table-column prop="cron" label="周期(cron)" width="110"></el-table-column>
         <el-table-column label="目标" min-width="140">
           <template #default="{row}">
-            <el-tag size="small" type="success" v-if="(row.target_window_ids||[]).length">窗口x{{row.target_window_ids.length}}</el-tag>
+            <el-tag size="small" type="warning" v-if="row.url_var">
+              {{ row.url_var }}·{{ varCount(row.url_var) }}窗
+            </el-tag>
+            <el-tag size="small" type="success" v-else-if="(row.target_window_ids||[]).length">窗口x{{row.target_window_ids.length}}</el-tag>
             <span v-else class="muted">未选择</span>
           </template>
         </el-table-column>
@@ -240,7 +260,7 @@
                   <el-option v-for="p in askPlatformList" :key="p.v"
                              :label="p.label + (p.ready ? '' : '（即将支持）')" :value="p.v" :disabled="!p.ready"></el-option>
                 </el-select>
-                <div class="muted">各窗口需提前在该平台登录好；每个目标窗口配置自己的对话框URL</div>
+                <div class="muted">各窗口需提前在该平台登录好；对话框URL在各窗口的「配置」中以变量保存，任务里直接引用</div>
               </el-form-item>
               <el-form-item label="提示词" required>
                 <el-select v-if="prompts.length" v-model="quickPick" clearable placeholder="从提示词库快捷填入（将覆盖下方内容）"
@@ -351,23 +371,23 @@
         <!-- 最后一步: 目标与计划 -->
         <div v-show="isTargetStep">
           <el-form :model="taskForm" label-width="130px">
-            <el-form-item label="目标分组">
-              <el-select v-model="taskForm.target_group_ids" multiple style="width:100%" placeholder="可选：筛选下方候选窗口">
-                <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id"></el-option>
-              </el-select>
-              <div class="muted">选分组后，下方「目标窗口」仅显示组内窗口；不选则显示全部。分组增删只影响候选列表，不会清除已勾选的窗口及其已填写的URL</div>
-            </el-form-item>
-            <el-form-item label="目标窗口">
-              <el-select v-model="taskForm.target_window_ids" multiple style="width:100%" filterable placeholder="勾选要执行的窗口（需在窗口管理中开启）">
-                <el-option v-for="w in taskWindowOptions" :key="w.id" :label="w.seq + ' - ' + w.name" :value="w.id"></el-option>
-              </el-select>
-            </el-form-item>
-            <template v-if="(taskForm.task_type==='ai_ask' || taskForm.source_type==='doubao_page') && taskTargets.length">
-              <el-divider content-position="left">{{ winUrlLabel }}（必填）</el-divider>
-              <el-form-item v-for="tw in taskTargets" :key="tw.id" :label="tw.seq + ' - ' + tw.name" label-width="170px" required>
-                <el-input :model-value="(taskForm.window_vars[tw.id] && taskForm.window_vars[tw.id].source_url) || ''"
-                          :placeholder="'必填：该窗口专属的' + (taskForm.task_type==='ai_ask' ? '对话框链接，如 https://www.doubao.com/chat/xxxx' : '豆包聊天页链接，如 https://www.doubao.com/chat/xxxx')"
-                          @update:model-value="v => setWinVar(tw.id, v)"></el-input>
+            <template v-if="isAsk">
+              <el-form-item label="对话框URL变量" required>
+                <el-select v-model="taskForm.url_var" filterable allow-create default-first-option
+                           style="width:100%" placeholder="选择窗口变量（默认：对话框URL）">
+                  <el-option v-for="k in winVarKeys" :key="k" :label="k + '（' + varCount(k) + '个窗口）'" :value="k"></el-option>
+                </el-select>
+                <div class="muted">执行时自动找到「所有在【窗口管理→配置】中设置了该变量的窗口」并取其值作为对话框URL逐个提问；新窗口配好变量即自动纳入</div>
+              </el-form-item>
+            </template>
+            <template v-else>
+              <el-form-item :label="taskForm.source_type==='doubao_page' ? '聊天页链接变量' : '目标窗口变量'" required>
+                <el-select v-model="taskForm.url_var" filterable allow-create default-first-option
+                           style="width:100%" placeholder="选择窗口变量（默认：对话框URL）">
+                  <el-option v-for="k in winVarKeys" :key="k" :label="k + '（' + varCount(k) + '个窗口）'" :value="k"></el-option>
+                </el-select>
+                <div class="muted" v-if="taskForm.source_type==='doubao_page'">执行时自动找到配置了该变量的窗口，并以其变量值作为该窗口的豆包聊天页链接；新窗口配好变量即自动纳入</div>
+                <div class="muted" v-else>按该变量圈定要发布的目标窗口（变量值不参与流程）；新窗口配好变量即自动纳入</div>
               </el-form-item>
             </template>
             <el-row :gutter="12">
@@ -608,6 +628,7 @@ const app = createApp({
     const status = ref({ bit_running:false, task_total:0, task_enabled:0 });
     const groups = ref([]);
     const windows = ref([]);
+    const winVars = ref({});   // 窗口变量: {window_id: {变量名: 值}}
     const tasks = ref([]);
     const syncing = ref(false);
     const groupFilter = ref('');
@@ -761,7 +782,9 @@ const app = createApp({
       syncing.value = true;
       try {
         const j = await api('/api/bit/sync', { method:'POST', body:'{}' });
-        groups.value = j.groups; windows.value = j.windows;
+        groups.value = j.groups;
+        winVars.value = j.win_vars || {};
+        windows.value = j.windows.map(w => Object.assign({}, w, { wvars: winVars.value[w.id] || {} }));
         pageNo.value = 1;
         if (!silent) ElementPlus.ElMessage.success(`同步完成：${j.groups.length} 个分组 / ${j.windows.length} 个窗口`);
       } catch(e) {
@@ -803,18 +826,27 @@ const app = createApp({
 
     const cfgVisible = ref(false);
     const cfgRow = ref(null);
-    const cfgForm = reactive({ enabled:false, task_ids:[], note:'' });
+    const cfgForm = reactive({ enabled:false, task_ids:[], note:'', var_rows:[] });
     function editCfg(row) {
       cfgRow.value = row;
       cfgForm.enabled = !!row.cfg.enabled;
       cfgForm.task_ids = [...(row.cfg.task_ids||[])];
       cfgForm.note = row.cfg.note || '';
+      const wv = row.wvars || {};
+      cfgForm.var_rows = Object.keys(wv).sort().map(k => ({ key:k, value:wv[k] }));
+      if (!cfgForm.var_rows.length) cfgForm.var_rows.push({ key:'对话框URL', value:'' });
       cfgVisible.value = true;
     }
     async function saveCfg() {
       try {
-        await api('/api/window-configs', { method:'PUT', body:JSON.stringify({ window_id:cfgRow.value.id, ...cfgForm }) });
+        await api('/api/window-configs', { method:'PUT', body:JSON.stringify({ window_id:cfgRow.value.id, enabled:cfgForm.enabled, task_ids:cfgForm.task_ids, note:cfgForm.note }) });
+        // 窗口变量整表替换(空key/空value行忽略; 全部为空即清空该窗口变量)
+        const varsObj = {};
+        cfgForm.var_rows.forEach(vr => { const k=(vr.key||'').trim(); const v=(vr.value||'').trim(); if (k && v) varsObj[k]=v; });
+        await api('/api/winvars', { method:'PUT', body:JSON.stringify({ window_id:cfgRow.value.id, vars:varsObj }) });
         cfgRow.value.cfg = { enabled:cfgForm.enabled, task_ids:[...cfgForm.task_ids], note:cfgForm.note };
+        cfgRow.value.wvars = Object.assign({}, varsObj);
+        winVars.value = Object.assign({}, winVars.value, { [cfgRow.value.id]: cfgRow.value.wvars });
         cfgVisible.value = false;
         ElementPlus.ElMessage.success('配置已保存');
       } catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
@@ -860,7 +892,7 @@ const app = createApp({
       source_type:'doubao_page', source_url:'', source_window_id:'', source_wait:15,
       items_path:'data', field_title:'title', field_video:'video_url',
       fetch_count:1, ai_model_id:'', ai_prompt:'', allow_repeat:true,
-      target_group_ids:[], target_window_ids:[], window_vars:{},
+      target_group_ids:[], target_window_ids:[], window_vars:{}, url_var:'对话框URL',
       daily_limit_per_window:1, close_after_publish:null
     });
     const askPlatformList = [
@@ -883,7 +915,6 @@ const app = createApp({
     const wizardSteps = computed(() => isAsk.value ? ['任务与提示词','目标与计划'] : ['内容源','AI整理','发布平台','目标与计划']);
     const lastStep = computed(() => wizardSteps.value.length - 1);
     const isTargetStep = computed(() => step.value === lastStep.value);
-    const winUrlLabel = computed(() => isAsk.value ? '各窗口对话框URL' : '各窗口聊天页链接');
     // ------- AI 模型 -------
     const models = ref([]);
     const modelVisible = ref(false);
@@ -985,30 +1016,32 @@ const app = createApp({
       ElementPlus.ElMessage.success(`已填入「${p.name || '未命名'}」`);
     }
     // 任务弹窗中豆包模式的实际生效目标(仅显式勾选的窗口)
-    const taskTargets = computed(() => {
-      const ids = new Set(taskForm.target_window_ids || []);
-      return (windows.value || []).filter(w => ids.has(w.id));
+    // 窗口变量: 供任务按变量圈定目标窗口(配置即生效)
+    async function loadWinVars(){ try { winVars.value = (await api('/api/winvars')).vars || {}; } catch(e){} }
+    const winVarKeys = computed(() => {
+      const s = new Set();
+      Object.values(winVars.value || {}).forEach(m => Object.keys(m || {}).forEach(k => k && s.add(k)));
+      return Array.from(s).sort();
     });
-    // 候选窗口: 选了分组则只显示组内窗口, 否则全部
-    const taskWindowOptions = computed(() => {
-      const gids = new Set(taskForm.target_group_ids || []);
-      if (!gids.size) return windows.value || [];
-      return (windows.value || []).filter(w => gids.has(w.group_id));
-    });
-    function setWinVar(id, v) {
-      if (!taskForm.window_vars) taskForm.window_vars = {};
-      const cur = Object.assign({}, taskForm.window_vars[id] || {});
-      cur.source_url = String(v || '').trim();
-      if (!cur.source_url && !cur.remark) delete taskForm.window_vars[id];
-      else taskForm.window_vars[id] = cur;
+    function varCount(k){
+      if (!k) return 0;
+      return (windows.value || []).filter(w => ((winVars.value[w.id] || {})[k] || '').trim()).length;
     }
-    function newTask(){ Object.assign(taskForm, blankTask()); step.value = 0; taskVisible.value = true; loadModels(); loadPrompts(); }
+    function winVarsSummary(wv){
+      return Object.keys(wv || {}).sort().map(k => k + '=' + wv[k]).join('；');
+    }
+    const varTargets = computed(() => {
+      if (!taskForm.url_var) return [];
+      return (windows.value || []).filter(w => ((winVars.value[w.id] || {})[taskForm.url_var] || '').trim());
+    });
+    function newTask(){ Object.assign(taskForm, blankTask()); step.value = 0; taskVisible.value = true; loadModels(); loadPrompts(); loadWinVars(); }
     function editTask(row){
       Object.assign(taskForm, blankTask(), JSON.parse(JSON.stringify(row)));
       if (!taskForm.window_vars) taskForm.window_vars = {};
       step.value = 0;
       taskVisible.value = true;
       loadModels();
+      loadWinVars();
     }
     function copyTask(row){
       editTask(row);
@@ -1045,14 +1078,14 @@ const app = createApp({
     async function saveTask() {
       for(let s=0;s<lastStep.value;s++){ if(!validateStep(s)) return; }
       if (!describeCron(taskForm.cron)) { ElementPlus.ElMessage.warning('执行周期 cron 表达式无效，请检查格式（5段：分 时 日 月 周）'); return; }
-      const needWinUrls = taskForm.task_type === 'ai_ask' || taskForm.source_type === 'doubao_page';
-      if (needWinUrls) {
-        const missing = taskTargets.value.filter(tw => !(taskForm.window_vars[tw.id] && taskForm.window_vars[tw.id].source_url));
-        if (!taskTargets.value.length) { ElementPlus.ElMessage.warning('请先选择目标窗口'); return; }
-        if (missing.length) {
-          ElementPlus.ElMessage.warning(`还有 ${missing.length} 个目标窗口未填${winUrlLabel.value}：${missing.slice(0,3).map(w=>w.name).join('、')}${missing.length>3?' 等':''}`);
-          return;
-        }
+      // 目标统一按窗口变量圈定(所有任务类型)
+      if (!String(taskForm.url_var || '').trim()) {
+        ElementPlus.ElMessage.warning('请选择「窗口URL变量」（先到【窗口管理→配置】为各窗口配置变量）');
+        return;
+      }
+      if (!varTargets.value.length) {
+        ElementPlus.ElMessage.warning(`没有窗口配置了变量「${taskForm.url_var}」，请到【窗口管理→配置】为各窗口填写`);
+        return;
       }
       try {
         if (taskForm.id) {
@@ -1115,7 +1148,7 @@ const app = createApp({
 
     // ------- lifecycle -------
     function onTab(name) {
-      if (name === 'tasks') { loadTasks(); }
+      if (name === 'tasks') { loadTasks(); loadWinVars(); }
       if (name === 'settings') loadSettings();
       if (name === 'ai') { loadModels(); }
       if (name === 'prompts') { loadPrompts(); }
@@ -1138,9 +1171,10 @@ const app = createApp({
       refreshStatus, startBit, syncAll, filteredWindows, pagedWindows, currentGroupName,
       openWin, closeWin, cfgVisible, cfgRow, cfgForm, editCfg, saveCfg, toggleCfg,
       batchVisible, batchForm, applyBatch, tmap, taskName,
-      taskVisible, taskForm, newTask, editTask, copyTask, saveTask, delTask, toggleTask, runTask, taskTargets, taskWindowOptions, setWinVar,
+      taskVisible, taskForm, newTask, editTask, copyTask, saveTask, delTask, toggleTask, runTask,
+      winVarKeys, varTargets, varCount, loadWinVars,
       step, nextStep, prevStep, platformList, platformLabel,
-      isAsk, wizardSteps, lastStep, isTargetStep, winUrlLabel, askPlatformList, taskTypeList, switchTaskType,
+      isAsk, wizardSteps, lastStep, isTargetStep, askPlatformList, taskTypeList, switchTaskType, winVarsSummary,
       models, modelVisible, modelEditing, testing, modelForm, newModel, editModel, saveModel, delModel, toggleModel, testModel, modelName,
       defaultPromptPreview, loadModels,
       prompts, promptVisible, promptEditing, promptCatFilter, quickPick, promptForm,

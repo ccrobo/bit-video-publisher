@@ -23,6 +23,22 @@ def resolve_targets(task, windows, configs):
     ]
 
 
+def resolve_targets_by_var(var_key, windows, wvars=None):
+    """按窗口变量解析目标: 返回所有配置了该变量的窗口(与启用状态无关, 配置即生效)。
+
+    每个返回元素附带 _var_value=变量值; 不修改传入的 windows 元素。
+    """
+    wvars = store.load_win_vars() if wvars is None else (wvars or {})
+    out = []
+    for w in windows:
+        v = ((wvars.get(w["id"]) or {}).get(var_key) or "").strip()
+        if v:
+            ww = dict(w)
+            ww["_var_value"] = v
+            out.append(ww)
+    return out
+
+
 def _fallback_content(material):
     """AI不可用时兜底: 取材料中最长的一段文字作为描述"""
     first = ""
@@ -112,14 +128,32 @@ def run_task(task_id, only_window_id=None):
         return
 
     configs = store.load_window_configs()
-    targets = [w for w in resolve_targets(task, windows, configs) if (not only_window_id or w["id"] == only_window_id)]
-    if not targets:
-        add_log(f"[{name}] 没有可执行的目标窗口（请先在【窗口管理】中开启抓取并绑定该任务）", "error")
-        return
+
+    # 变量模式(所有任务类型统一): 任务只选变量名, 执行时自动找到配置了该变量的窗口并取值
+    url_var = (task.get("url_var") or "").strip()
+    if url_var:
+        targets = resolve_targets_by_var(url_var, windows)
+        targets = [w for w in targets if (not only_window_id or w["id"] == only_window_id)]
+        if not targets:
+            add_log(
+                f"[{name}] 没有窗口配置了变量[{url_var}]，"
+                f"请到【窗口管理→配置】为各窗口填写该变量后重试",
+                "error",
+            )
+            return
+    else:
+        targets = [w for w in resolve_targets(task, windows, configs) if (not only_window_id or w["id"] == only_window_id)]
 
     # AI提问任务: 独立流程(打开对话框URL发送提示词)
     if task.get("task_type") == "ai_ask":
+        if not targets:
+            add_log(f"[{name}] 没有可执行的目标窗口（请选择URL变量或在窗口管理中开启并绑定）", "error")
+            return
         run_ai_ask(task, bit, settings, targets)
+        return
+
+    if not targets:
+        add_log(f"[{name}] 没有可执行的目标窗口（请先在【窗口管理】中开启抓取并绑定该任务）", "error")
         return
 
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -142,9 +176,9 @@ def run_task(task_id, only_window_id=None):
         wait_s = int(task.get("source_wait") or 15)
         count_n = max(1, int(task.get("fetch_count") or 1))
         for w in targets:
-            src = ((wvars.get(w["id"]) or {}).get("source_url") or "").strip()
+            src = (w.get("_var_value") or ((wvars.get(w["id"]) or {}).get("source_url") or "")).strip()
             if not src:
-                add_log(f"[{name}] 窗口[{w['name']}] 未配置聊天页链接，跳过（每个目标窗口必须有自己的链接）", "error")
+                add_log(f"[{name}] 窗口[{w['name']}] 未配置聊天页链接(变量)，跳过", "error")
                 continue
             dkey = f"{w['id']}|{_today()}"
             used = state.setdefault("daily", {}).get(dkey, 0)
@@ -314,6 +348,7 @@ def run_ai_ask(task, bit, settings, targets):
         add_log(f"[{name}] 未配置提示词，任务结束", "error")
         return
     platform = task.get("ask_platform") or "doubao"
+    url_var = (task.get("url_var") or "").strip()
     wvars = task.get("window_vars") or {}
     wait_s = int(task.get("ask_wait") or 30)
     ask_vars = list(task.get("ask_vars") or [])
@@ -328,12 +363,14 @@ def run_ai_ask(task, bit, settings, targets):
     ok_cnt, fail_cnt = 0, 0
     add_log(
         f"[{name}] AI提问模式: 平台[{platform}], 目标 {len(targets)} 个窗口"
+        + (f", URL变量[{url_var}]" if url_var else "")
         + (f", 每日上限 {limit} 次/窗口" if limit > 0 else "")
         + (", 豆包视频生成模式" if video_mode else "")
         + (f", 变量补充: {ask_vars}" if ask_vars else "")
     )
     for w in targets:
-        src = ((wvars.get(w["id"]) or {}).get("source_url") or "").strip()
+        # 变量模式: URL来自窗口变量(resolve_targets_by_var 附带的 _var_value); 否则用任务内逐窗配置
+        src = (w.get("_var_value") if url_var else "") or ((wvars.get(w["id"]) or {}).get("source_url") or "").strip()
         if not src:
             add_log(f"[{name}] 窗口[{w['name']}] 未配置对话框URL，跳过（每个目标窗口必须有自己的链接）", "error")
             continue

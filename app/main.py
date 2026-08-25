@@ -107,11 +107,13 @@ def bit_sync():
         raise HTTPException(400, f"同步失败: {e}")
     gmap = {g["id"]: g["name"] for g in groups}
     cfgs = store.load_window_configs()
+    wvars = store.load_win_vars()
     for w in windows:
         w["group_name"] = w.get("group_name") or gmap.get(w["group_id"], "默认分组")
         w["cfg"] = cfgs.get(w["id"]) or {"enabled": False, "task_ids": [], "note": ""}
+        w["wvars"] = wvars.get(w["id"]) or {}
     add_log(f"已同步比特浏览器: {len(groups)} 个分组, {len(windows)} 个窗口")
-    return {"groups": groups, "windows": windows}
+    return {"groups": groups, "windows": windows, "win_vars": wvars}
 
 
 @app.get("/api/groups")
@@ -196,13 +198,12 @@ def post_task(patch: dict = Body(...)):
     data = _clean_task(patch)
     if not data.get("name"):
         raise HTTPException(400, "任务名称不能为空")
+    if not str(data.get("url_var") or "").strip():
+        raise HTTPException(400, "请选择窗口URL变量（先到【窗口管理→配置】为各窗口配置变量）")
     if data.get("task_type") == "ai_ask":
         if not (data.get("prompt_text") or "").strip():
             raise HTTPException(400, "AI提问任务需填写提示词")
-    elif data.get("source_type") == "doubao_page":
-        if not any(v.get("source_url") for v in (data.get("window_vars") or {}).values()):
-            raise HTTPException(400, "豆包模式需至少为一个目标窗口配置聊天页链接")
-    elif not data.get("source_url"):
+    elif data.get("source_type") != "doubao_page" and not data.get("source_url"):
         raise HTTPException(400, "视频源URL不能为空")
     task = store.create_task(data)
     scheduler_mod.reload_jobs()
@@ -363,6 +364,32 @@ def remove_prompt(pid: str):
 @app.get("/api/window-configs")
 def get_window_configs():
     return {"configs": store.load_window_configs()}
+
+
+# ---------------- 窗口变量 ----------------
+
+@app.get("/api/winvars")
+def get_winvars():
+    return {"vars": store.load_win_vars()}
+
+
+@app.put("/api/winvars")
+def put_winvar(body: dict = Body(...)):
+    wid = str(body.get("window_id") or "")
+    if not wid:
+        raise HTTPException(400, "缺少 window_id")
+    if "vars" in body:
+        # 整表替换该窗口的全部变量: {window_id, vars:{k:v,...}}
+        store.set_window_vars(wid, body.get("vars") or {})
+        add_log(f"窗口变量已保存(整表): {wid[:8]}… 共{len((body.get('vars') or {}))}项")
+    else:
+        key = str(body.get("key") or "").strip()
+        if not key:
+            raise HTTPException(400, "缺少 key 或 vars")
+        value = str(body.get("value") or "")
+        store.set_win_var(wid, key, value)
+        add_log(f"窗口变量已保存: {wid[:8]}… [{key}]={'(已清除)' if not value.strip() else value[:60]}")
+    return {"ok": True, "vars": store.load_win_vars()}
 
 
 @app.put("/api/window-configs")

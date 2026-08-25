@@ -123,6 +123,7 @@ TASK_DEFAULTS = {
     "target_group_ids": [],
     "target_window_ids": [],
     "window_vars": {},
+    "url_var": "",  # ai_ask: 引用的窗口变量名(如"对话框URL"), 设置后按变量自动圈定目标窗口并取各窗口URL
     "daily_limit_per_window": 1,
     "close_after_publish": None,
 }
@@ -286,6 +287,55 @@ def load_window_configs():
 
 def save_window_configs(cfgs):
     _write("window_configs.json", cfgs)
+
+
+# ---------------- 窗口变量(全局复用) ----------------
+# 结构: {window_id: {变量名: 值}}; 例如每个窗口配置"对话框URL"后, AI提问任务直接引用该变量
+
+def load_win_vars():
+    return _read("win_vars.json", {})
+
+
+def set_win_var(window_id, key, value):
+    """设置/删除(空值即删除)某窗口的一个变量; 删除最后一个变量时清理窗口条目"""
+    if not window_id or not key:
+        return load_win_vars()
+    d = load_win_vars()
+    wv = dict(d.get(window_id) or {})
+    v = str(value if value is not None else "").strip()
+    if v:
+        wv[key] = v
+    else:
+        wv.pop(key, None)
+    if wv:
+        d[window_id] = wv
+    else:
+        d.pop(window_id, None)
+    save_win_vars(d)
+    return d
+
+
+def set_window_vars(window_id, vars_map):
+    """整表替换某窗口的全部变量(键值均去首尾空白, 空值/空键忽略); 全空则清理窗口条目"""
+    if not window_id:
+        return load_win_vars()
+    d = load_win_vars()
+    clean = {}
+    for k, v in (vars_map or {}).items():
+        k = str(k).strip()
+        v = str(v if v is not None else "").strip()
+        if k and v:
+            clean[k] = v
+    if clean:
+        d[window_id] = clean
+    else:
+        d.pop(window_id, None)
+    save_win_vars(d)
+    return d
+
+
+def save_win_vars(d):
+    _write("win_vars.json", d)
 
 
 def upsert_window_config(window_id, patch):
