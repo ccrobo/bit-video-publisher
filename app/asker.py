@@ -8,6 +8,7 @@ from .logs import add_log
 
 ASK_PLATFORMS = [
     {"id": "doubao", "name": "豆包", "ready": True},
+    {"id": "xiaoyunque", "name": "小云雀", "ready": True},
     {"id": "workbuddy", "name": "WorkBuddy", "ready": False},
     {"id": "qianwen", "name": "通义千问", "ready": False},
     {"id": "yuanbao", "name": "腾讯元宝", "ready": False},
@@ -48,15 +49,16 @@ _INPUT_HAS_TEXT_JS = """
 }
 """
 
-# 发送按钮(兜底: Enter 无效时点击)
+# 发送按钮(兜底: Enter 无效时点击); 兼容图标按钮的 aria-label/id 含 send
 _FIND_SEND_JS = """
 () => {
-  const btns = [...document.querySelectorAll('button, [role=button], div[class*=send]')].filter(b => {
-    const t = ((b.getAttribute('aria-label') || '') + ' ' + (b.id || '') + ' ' + (b.innerText || '')).trim();
-    if (!/发送/.test(t)) return false;
-    const r = b.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  });
+  const btns = [...document.querySelectorAll('button, [role=button], div[class*=send], span')]
+    .filter(b => {
+      const t = ((b.getAttribute('aria-label') || '') + ' ' + (b.id || '') + ' ' + (b.innerText || '')).trim();
+      if (!/发送|send/i.test(t)) return false;
+      const r = b.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
   if (!btns.length) return null;
   const b = btns[btns.length - 1];
   const r = b.getBoundingClientRect();

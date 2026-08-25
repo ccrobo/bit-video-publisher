@@ -11,7 +11,7 @@ from . import store
 from .bitclient import BitBrowserError, BitClient
 from .llm import LLMError, test_model
 from .logs import add_log, get_logs, last_id
-from .task_runner import run_async
+from .task_runner import get_scraper, run_async
 
 
 @asynccontextmanager
@@ -216,7 +216,7 @@ def post_task(patch: dict = Body(...)):
     if data.get("task_type") == "ai_ask":
         if not (data.get("prompt_text") or "").strip():
             raise HTTPException(400, "AI提问任务需填写提示词")
-    elif data.get("source_type") != "doubao_page" and not data.get("source_url"):
+    elif not get_scraper(data.get("source_type")) and not data.get("source_url"):
         raise HTTPException(400, "视频源URL不能为空")
     task = store.create_task(data)
     scheduler_mod.reload_jobs()

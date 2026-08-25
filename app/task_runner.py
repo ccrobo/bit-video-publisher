@@ -6,6 +6,7 @@ from pathlib import Path
 from . import platforms, sources, store
 from .bitclient import BitClient, BitBrowserError
 from .doubao import scrape_doubao_chat
+from .xiaoyunque import scrape_xiaoyunque_chat
 from .llm import refine_content
 from .logs import add_log
 
@@ -114,6 +115,18 @@ def gate_targets_by_enabled(targets, configs):
     return ok, skipped
 
 
+# 浏览器抓取模式注册表: source_type -> (抓取函数, 下载Referer)
+_SCRAPERS = {
+    "doubao_page": (scrape_doubao_chat, "https://www.doubao.com/"),
+    "xiaoyunque_page": (scrape_xiaoyunque_chat, "https://xyq.jianying.com/"),
+}
+
+
+def get_scraper(source_type):
+    """按内容源类型返回 (抓取函数, Referer); 非浏览器抓取模式返回 None"""
+    return _SCRAPERS.get(str(source_type or "").strip())
+
+
 def run_task(task_id, only_window_id=None):
     task = store.get_task(task_id)
     if not task:
@@ -191,8 +204,10 @@ def run_task(task_id, only_window_id=None):
 
     ok_cnt, fail_cnt = 0, 0
 
-    if task.get("source_type") == "doubao_page":
-        # 豆包模式: 每个目标窗口各自打开自己的聊天页链接, 抓材料 -> AI整理 -> 发布到所选平台
+    scraper = get_scraper(task.get("source_type"))
+    if scraper:
+        scrape_fn, referer = scraper
+        # 浏览器抓取模式(豆包/小云雀): 每个目标窗口各自打开自己的聊天页链接, 抓材料 -> AI整理 -> 发布到所选平台
         wvars = task.get("window_vars") or {}
         wait_s = int(task.get("source_wait") or 15)
         count_n = max(1, int(task.get("fetch_count") or 1))
@@ -207,7 +222,7 @@ def run_task(task_id, only_window_id=None):
                 add_log(f"[{name}] 窗口[{w['name']}] 今日已达上限({limit})，跳过")
                 continue
             try:
-                vids, caps = scrape_doubao_chat(bit, settings, src, w, wait_s)
+                vids, caps = scrape_fn(bit, settings, src, w, wait_s)
             except Exception as e:
                 add_log(f"[{name}] 窗口[{w['name']}] 抓取失败: {e}", "error")
                 continue
@@ -236,7 +251,7 @@ def run_task(task_id, only_window_id=None):
                 try:
                     vpath = sources.download_video(
                         u, dl_root / task_id / w["id"],
-                        {"User-Agent": "Mozilla/5.0", "Referer": "https://www.doubao.com/"},
+                        {"User-Agent": "Mozilla/5.0", "Referer": referer},
                     )
                 except Exception as e:
                     add_log(f"[{name}] 窗口[{w['name']}] 视频下载失败，跳过: {e}", "error")

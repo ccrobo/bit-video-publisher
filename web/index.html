@@ -237,6 +237,7 @@
         <el-table-column label="内容源" width="120">
           <template #default="{row}">
             <el-tag size="small" v-if="row.source_type==='doubao_page'">豆包聊天页</el-tag>
+            <el-tag size="small" type="success" v-else-if="row.source_type==='xiaoyunque_page'">小云雀聊天页</el-tag>
             <el-tag size="small" type="info" v-else>JSON接口</el-tag>
           </template>
         </el-table-column>
@@ -353,12 +354,13 @@
               <el-col :span="12"><el-form-item label="内容源类型">
                 <el-select v-model="taskForm.source_type" style="width:100%">
                   <el-option label="豆包聊天页(浏览器抓取)" value="doubao_page"></el-option>
+                  <el-option label="小云雀聊天页(浏览器抓取)" value="xiaoyunque_page"></el-option>
                   <el-option label="JSON 接口" value="json"></el-option>
                 </el-select>
                 <div class="muted">后续将支持：WorkBuddy / 千问 / 元宝 / 语雀 / 可灵 / 即梦</div>
               </el-form-item></el-col>
             </el-row>
-            <template v-if="taskForm.source_type!=='doubao_page'">
+            <template v-if="!isBrowserSource">
               <el-form-item label="视频源URL" required>
                 <el-input v-model="taskForm.source_url" placeholder="返回JSON的接口地址"></el-input>
               </el-form-item>
@@ -371,9 +373,9 @@
                   <el-input v-model="taskForm.field_video"></el-input></el-form-item></el-col>
               </el-row>
             </template>
-            <el-form-item v-if="taskForm.source_type==='doubao_page'" label="等待加载(秒)">
+            <el-form-item v-if="isBrowserSource" label="等待加载(秒)">
               <el-input-number v-model="taskForm.source_wait" :min="5" :max="120"></el-input-number>
-              <span class="muted" style="margin-left:8px">每个窗口打开自己的聊天页链接抓取，需该窗口已登录豆包</span>
+              <span class="muted" style="margin-left:8px">{{ taskForm.source_type==='xiaoyunque_page' ? '每个窗口打开自己的小云雀聊天页抓取，需该窗口已登录剪映' : '每个窗口打开自己的聊天页链接抓取，需该窗口已登录豆包' }}</span>
             </el-form-item>
             </template>
           </el-form>
@@ -429,12 +431,12 @@
               </el-form-item>
             </template>
             <template v-else>
-              <el-form-item :label="taskForm.source_type==='doubao_page' ? '聊天页链接变量' : '目标窗口变量'" required>
+              <el-form-item :label="isBrowserSource ? '聊天页链接变量' : '目标窗口变量'" required>
                 <el-select v-model="taskForm.url_var" filterable allow-create default-first-option
                            style="width:100%" placeholder="选择窗口变量（默认：对话框URL）">
                   <el-option v-for="k in winVarKeys" :key="k" :label="k + '（' + varCount(k) + '个窗口）'" :value="k"></el-option>
                 </el-select>
-                <div class="muted" v-if="taskForm.source_type==='doubao_page'">执行时自动找到配置了该变量的窗口，并以其变量值作为该窗口的豆包聊天页链接；新窗口配好变量即自动纳入</div>
+                <div class="muted" v-if="isBrowserSource">执行时自动找到配置了该变量的窗口，并以其变量值作为该窗口的{{ taskForm.source_type==='xiaoyunque_page' ? '小云雀' : '豆包' }}聊天页链接；新窗口配好变量即自动纳入</div>
                 <div class="muted" v-else>按该变量圈定要发布的目标窗口（变量值不参与流程）；新窗口配好变量即自动纳入</div>
               </el-form-item>
             </template>
@@ -947,6 +949,7 @@ const app = createApp({
     });
     const askPlatformList = [
       { v:'doubao', label:'豆包', ready:true },
+      { v:'xiaoyunque', label:'小云雀', ready:true },
       { v:'workbuddy', label:'WorkBuddy', ready:false },
       { v:'qianwen', label:'通义千问', ready:false },
       { v:'yuanbao', label:'腾讯元宝', ready:false },
@@ -962,6 +965,7 @@ const app = createApp({
     // 视频发布 = 内容源/提问设置(0) -> AI整理(1) -> 发布平台(2) -> 目标与计划(3)
     // AI 提问  = 类型与提示词(0) -> 目标与计划(1)
     const isAsk = computed(() => taskForm.task_type === 'ai_ask');
+    const isBrowserSource = computed(() => ['doubao_page', 'xiaoyunque_page'].includes(taskForm.source_type));
     const wizardSteps = computed(() => isAsk.value ? ['任务与提示词','目标与计划'] : ['内容源','AI整理','发布平台','目标与计划']);
     const lastStep = computed(() => wizardSteps.value.length - 1);
     const isTargetStep = computed(() => step.value === lastStep.value);
@@ -1151,7 +1155,7 @@ const app = createApp({
         return true;
       }
       if(s===0){
-        if(taskForm.source_type!=='doubao_page' && !taskForm.source_url){ ElementPlus.ElMessage.warning('请填写视频源URL'); return false; }
+        if(!isBrowserSource.value && !taskForm.source_url){ ElementPlus.ElMessage.warning('请填写视频源URL'); return false; }
       }
       if(s===1 && !taskForm.ai_model_id){
         ElementPlus.ElMessage.warning('请选择推理模型（可在【AI 模型】页配置 Key 后使用）'); return false;
@@ -1300,6 +1304,7 @@ const app = createApp({
       varDefs, varDefVisible, vdForm, openVarDefs, saveVarDef, editVarDef, delVarDef, resetVdForm, varDefOptions, varDefNote, loadVarDefs,
       step, nextStep, prevStep, platformList, platformLabel,
       isAsk, wizardSteps, lastStep, isTargetStep, askPlatformList, taskTypeList, switchTaskType, winVarsSummary,
+      isBrowserSource,
       models, modelVisible, modelEditing, testing, modelForm, newModel, editModel, saveModel, delModel, toggleModel, testModel, modelName,
       defaultPromptPreview, loadModels,
       prompts, promptVisible, promptEditing, promptCatFilter, quickPick, promptForm,
