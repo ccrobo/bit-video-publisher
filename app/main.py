@@ -18,10 +18,23 @@ from .task_runner import run_async
 async def lifespan(app: FastAPI):
     store.DATA_DIR.mkdir(parents=True, exist_ok=True)
     _migrate_legacy_targets()
+    _ensure_var_defs()
     add_log("服务已启动，访问 http://127.0.0.1:8799/ 打开控制台")
     scheduler_mod.start()
     yield
     scheduler_mod.shutdown()
+
+
+def _ensure_var_defs():
+    """首次启动预置常用变量定义(公共key), 供窗口配置时选择"""
+    try:
+        if not (store.DATA_DIR / "var_defs.json").exists():
+            store.save_var_defs([
+                {"key": "对话框URL", "note": "该窗口专属的豆包对话页链接"},
+            ])
+            add_log("已预置变量定义: 对话框URL")
+    except Exception as e:
+        add_log(f"预置变量定义失败(忽略): {e}")
 
 
 def _migrate_legacy_targets():
@@ -390,6 +403,48 @@ def put_winvar(body: dict = Body(...)):
         store.set_win_var(wid, key, value)
         add_log(f"窗口变量已保存: {wid[:8]}… [{key}]={'(已清除)' if not value.strip() else value[:60]}")
     return {"ok": True, "vars": store.load_win_vars()}
+
+
+# ---------------- 变量定义(公共key) ----------------
+
+@app.get("/api/var-defs")
+def get_var_defs():
+    return {"defs": store.load_var_defs()}
+
+
+@app.post("/api/var-defs")
+def post_var_def(body: dict = Body(...)):
+    key = str(body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "变量名不能为空")
+    defs, err = store.upsert_var_def(key, body.get("note") or "")
+    if err:
+        raise HTTPException(400, err)
+    add_log(f"变量定义已新增: [{key}]")
+    return {"ok": True, "defs": defs}
+
+
+@app.put("/api/var-defs")
+def put_var_def(body: dict = Body(...)):
+    key = str(body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "缺少 key")
+    new_key = str(body.get("new_key") or "").strip() or None
+    defs, err = store.upsert_var_def(key, body.get("note") or "", new_key=new_key)
+    if err:
+        raise HTTPException(400, err)
+    add_log(f"变量定义已更新: [{key}] -> [{new_key or key}]")
+    return {"ok": True, "defs": defs}
+
+
+@app.delete("/api/var-defs")
+def del_var_def(body: dict = Body(...)):
+    key = str(body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "缺少 key")
+    defs = store.delete_var_def(key)
+    add_log(f"变量定义已删除: [{key}]（各窗口已配置的值保留）")
+    return {"ok": True, "defs": defs}
 
 
 @app.put("/api/window-configs")

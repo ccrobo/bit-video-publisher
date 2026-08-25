@@ -338,6 +338,63 @@ def save_win_vars(d):
     _write("win_vars.json", d)
 
 
+# ---------------- 变量定义(公共) ----------------
+# 结构: [{"key": 变量名, "note": 说明}, ...]; 窗口配置时只能从这些key中选择并填值
+
+def load_var_defs():
+    return _read("var_defs.json", [])
+
+
+def save_var_defs(defs):
+    _write("var_defs.json", defs)
+
+
+def upsert_var_def(key, note="", new_key=None):
+    """新增/更新变量定义; 重命名时同步迁移各窗口已配置的同名键。返回 (defs, 错误信息)"""
+    key = str(key or "").strip()
+    target = str(new_key or key or "").strip()
+    if not key or not target:
+        return load_var_defs(), "变量名不能为空"
+    defs = load_var_defs()
+    if new_key:
+        # 编辑模式: 目标名与其他定义冲突则报错
+        if target != key and any(d.get("key") == target for d in defs):
+            return defs, f"变量[{target}]已存在"
+    else:
+        # 新增模式: key 已存在报错
+        if any(d.get("key") == key for d in defs):
+            return defs, f"变量[{key}]已存在"
+    found = False
+    for d in defs:
+        if d.get("key") == key:
+            d["key"] = target
+            d["note"] = str(note or "").strip()
+            found = True
+            break
+    if not found:
+        defs.append({"key": target, "note": str(note or "").strip()})
+        defs.sort(key=lambda x: x.get("key", ""))
+    save_var_defs(defs)
+    if target != key:
+        wv = load_win_vars()
+        changed = False
+        for m in wv.values():
+            if key in m:
+                m[target] = m.pop(key)
+                changed = True
+        if changed:
+            save_win_vars(wv)
+    return defs, ""
+
+
+def delete_var_def(key):
+    """删除变量定义(不影响各窗口已配置的值)"""
+    key = str(key or "").strip()
+    defs = [d for d in load_var_defs() if d.get("key") != key]
+    save_var_defs(defs)
+    return defs
+
+
 def upsert_window_config(window_id, patch):
     cfgs = load_window_configs()
     c = cfgs.get(window_id) or {"enabled": False, "task_ids": [], "note": ""}

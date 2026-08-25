@@ -78,6 +78,7 @@
         <el-input v-model="keyword" placeholder="搜索名称/备注/序号" clearable style="width:220px"></el-input>
         <el-button type="primary" @click="syncAll" :loading="syncing">同步窗口</el-button>
         <el-button :disabled="!selected.length" @click="batchVisible=true">批量设置 ({{selected.length}})</el-button>
+        <el-button @click="openVarDefs">变量设置</el-button>
         <span class="muted">共 {{ filteredWindows.length }} 个窗口，当前组 {{ currentGroupName }}</span>
       </div>
       <el-table :data="pagedWindows" @selection-change="s=>selected=s" size="default" border stripe>
@@ -133,12 +134,16 @@
           <el-form-item label="窗口变量">
             <div style="width:100%">
               <div v-for="(vr,i) in cfgForm.var_rows" :key="i" style="display:flex;gap:6px;margin-bottom:6px">
-                <el-input v-model="vr.key" placeholder="变量名" style="width:150px"></el-input>
-                <el-input v-model="vr.value" placeholder="值，如 https://www.doubao.com/chat/xxxx"></el-input>
+                <el-select v-model="vr.key" filterable allow-create default-first-option
+                           placeholder="选择变量" style="width:160px">
+                  <el-option v-for="d in varDefOptions(i)" :key="d.key" :label="d.key" :value="d.key"></el-option>
+                </el-select>
+                <el-input v-model="vr.value" :placeholder="varDefNote(vr.key) || '输入该窗口的值，如 https://www.doubao.com/chat/xxxx'"></el-input>
                 <el-button link type="danger" @click="cfgForm.var_rows.splice(i,1)">删除</el-button>
               </div>
-              <el-button size="small" @click="cfgForm.var_rows.push({key:'',value:''})">+ 添加变量</el-button>
-              <div class="muted">任意 key=value；任务里按变量名引用（如「对话框URL」），执行时自动取各窗口该变量的值。删除所有行并保存即清空</div>
+              <el-button size="small" type="primary" plain :disabled="!cfgForm.var_rows.every(r=>r.key)"
+                         @click="cfgForm.var_rows.push({key:'',value:''})">+ 添加变量</el-button>
+              <div class="muted">从「变量设置」中定义的公共key里选择并填写本窗口的值；执行时任务按key自动取各窗口的值。没有需要的key？点工具栏【变量设置】去添加</div>
             </div>
           </el-form-item>
           <el-form-item label="备注">
@@ -149,6 +154,35 @@
           <el-button @click="cfgVisible=false">取消</el-button>
           <el-button type="primary" @click="saveCfg">保存</el-button>
         </template>
+      </el-dialog>
+
+      <!-- 变量设置(公共key管理) -->
+      <el-dialog v-model="varDefVisible" title="变量设置（公共key）" width="560">
+        <div class="muted" style="margin-bottom:10px">在此统一维护变量key；各窗口配置时只能从这里选择key并填写各自的值。重命名会同步迁移各窗口已填的数据。</div>
+        <div style="display:flex;gap:6px;margin-bottom:14px">
+          <el-input v-model="vdForm.key" placeholder="变量名，如 聊天页链接" style="width:200px"
+                    :disabled="!!vdForm.editing"></el-input>
+          <el-input v-model="vdForm.note" placeholder="说明（选填）"></el-input>
+          <el-button v-if="!vdForm.editing" type="primary" @click="saveVarDef">添加</el-button>
+          <template v-else>
+            <el-button type="primary" @click="saveVarDef">保存修改</el-button>
+            <el-button @click="resetVdForm">取消</el-button>
+          </template>
+        </div>
+        <el-table :data="varDefs" size="small" border max-height="300">
+          <el-table-column prop="key" label="变量名" width="180"></el-table-column>
+          <el-table-column prop="note" label="说明" show-overflow-tooltip>
+            <template #default="{row}"><span :class="row.note ? '' : 'muted'">{{ row.note || '—' }}</span></template>
+          </el-table-column>
+          <el-table-column label="操作" width="130">
+            <template #default="{row}">
+              <el-button link type="primary" size="small" @click="editVarDef(row)">编辑</el-button>
+              <el-popconfirm title="删除该定义？各窗口已填的值将保留" @confirm="delVarDef(row)">
+                <template #reference><el-button link type="danger" size="small">删除</el-button></template>
+              </el-popconfirm>
+            </template>
+          </el-table-column>
+        </el-table>
       </el-dialog>
 
       <!-- 批量设置 -->
@@ -786,6 +820,7 @@ const app = createApp({
         winVars.value = j.win_vars || {};
         windows.value = j.windows.map(w => Object.assign({}, w, { wvars: winVars.value[w.id] || {} }));
         pageNo.value = 1;
+        loadVarDefs();
         if (!silent) ElementPlus.ElMessage.success(`同步完成：${j.groups.length} 个分组 / ${j.windows.length} 个窗口`);
       } catch(e) {
         if (!silent) ElementPlus.ElMessage.error(String(e.message||e));
@@ -834,7 +869,8 @@ const app = createApp({
       cfgForm.note = row.cfg.note || '';
       const wv = row.wvars || {};
       cfgForm.var_rows = Object.keys(wv).sort().map(k => ({ key:k, value:wv[k] }));
-      if (!cfgForm.var_rows.length) cfgForm.var_rows.push({ key:'对话框URL', value:'' });
+      if (!cfgForm.var_rows.length) cfgForm.var_rows.push({ key:(varDefs.value[0] && varDefs.value[0].key) || '', value:'' });
+      loadVarDefs();
       cfgVisible.value = true;
     }
     async function saveCfg() {
@@ -1018,8 +1054,54 @@ const app = createApp({
     // 任务弹窗中豆包模式的实际生效目标(仅显式勾选的窗口)
     // 窗口变量: 供任务按变量圈定目标窗口(配置即生效)
     async function loadWinVars(){ try { winVars.value = (await api('/api/winvars')).vars || {}; } catch(e){} }
+    // 公共变量key定义: 在「窗口管理→变量设置」统一维护, 窗口配置时只能从中选择
+    const varDefs = ref([]);
+    const varDefVisible = ref(false);
+    const vdForm = reactive({ key:'', note:'', editing:'' });
+    async function loadVarDefs(){ try { varDefs.value = (await api('/api/var-defs')).defs || []; } catch(e){} }
+    function openVarDefs(){ resetVdForm(); loadVarDefs(); loadWinVars(); varDefVisible.value = true; }
+    function resetVdForm(){ vdForm.key=''; vdForm.note=''; vdForm.editing=''; }
+    function editVarDef(row){ vdForm.editing = row.key; vdForm.key = row.key; vdForm.note = row.note || ''; }
+    async function saveVarDef(){
+      const key = (vdForm.key||'').trim();
+      if (!key) { ElementPlus.ElMessage.warning('请填写变量名'); return; }
+      try {
+        if (vdForm.editing) {
+          await api('/api/var-defs', { method:'PUT', body:JSON.stringify({ key:vdForm.editing, new_key:key, note:vdForm.note }) });
+          // 重命名后同步刷新本地窗口变量显示
+          windows.value.forEach(w => {
+            if (w.wvars && w.wvars[vdForm.editing] !== undefined) {
+              w.wvars[key] = w.wvars[vdForm.editing];
+              delete w.wvars[vdForm.editing];
+            }
+          });
+        } else {
+          await api('/api/var-defs', { method:'POST', body:JSON.stringify({ key, note:vdForm.note }) });
+        }
+        ElementPlus.ElMessage.success('已保存');
+        resetVdForm();
+        await loadVarDefs();
+      } catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
+    }
+    async function delVarDef(row){
+      try { await api('/api/var-defs', { method:'DELETE', body:JSON.stringify({ key:row.key }) }); await loadVarDefs(); }
+      catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
+    }
+    // 窗口配置行的key下拉候选: 全部定义 - 本窗口其他行已选 + 当前行当前值(遗留键兼容)
+    function varDefOptions(rowIdx){
+      const used = new Set(cfgForm.var_rows.filter((r,i)=>i!==rowIdx && r.key).map(r=>r.key));
+      const cur = cfgForm.var_rows[rowIdx] && cfgForm.var_rows[rowIdx].key;
+      const opts = varDefs.value.filter(d => !used.has(d.key) || d.key === cur);
+      if (cur && !opts.some(d=>d.key===cur)) opts.unshift({key:cur, note:''});
+      return opts;
+    }
+    function varDefNote(key){
+      const d = (varDefs.value || []).find(x => x.key === key);
+      return d ? d.note : '';
+    }
+    // 任务里可选的变量 = 公共定义 ∪ 各窗口实际已配置的键
     const winVarKeys = computed(() => {
-      const s = new Set();
+      const s = new Set((varDefs.value || []).map(d => d.key).filter(Boolean));
       Object.values(winVars.value || {}).forEach(m => Object.keys(m || {}).forEach(k => k && s.add(k)));
       return Array.from(s).sort();
     });
@@ -1173,6 +1255,7 @@ const app = createApp({
       batchVisible, batchForm, applyBatch, tmap, taskName,
       taskVisible, taskForm, newTask, editTask, copyTask, saveTask, delTask, toggleTask, runTask,
       winVarKeys, varTargets, varCount, loadWinVars,
+      varDefs, varDefVisible, vdForm, openVarDefs, saveVarDef, editVarDef, delVarDef, resetVdForm, varDefOptions, varDefNote, loadVarDefs,
       step, nextStep, prevStep, platformList, platformLabel,
       isAsk, wizardSteps, lastStep, isTargetStep, askPlatformList, taskTypeList, switchTaskType, winVarsSummary,
       models, modelVisible, modelEditing, testing, modelForm, newModel, editModel, saveModel, delModel, toggleModel, testModel, modelName,
