@@ -112,6 +112,22 @@ _LATEST_REPLY_TEXT_JS = """
 }
 """
 
+# 聊天区为虚拟滚动列表: 打开页面后必须先滚到底部, 最新的消息块才会挂载进DOM
+_SCROLL_BOTTOM_JS = """
+() => {
+  let moved = false;
+  const els = [document.scrollingElement || document.documentElement,
+               ...document.querySelectorAll('div')]
+    .filter(d => d.scrollHeight > d.clientHeight + 50);
+  els.forEach(d => {
+    const before = d.scrollTop;
+    d.scrollTop = d.scrollHeight;
+    if (d.scrollTop > before + 5) moved = true;
+  });
+  return moved;
+}
+"""
+
 # 聊天区虚拟滚动: 逐屏向上滚促使历史消息挂载
 _SCROLL_UP_JS = """
 () => {
@@ -143,7 +159,14 @@ _LATEST_CARD_INFO_JS = """
       .filter(el => el.getBoundingClientRect().width > 120);
   }
   if (!cards.length) return null;
-  const el = cards[cards.length - 1];
+  // 选视口最靠下(=最新消息)的可见卡片
+  let el = null, bestB = -1;
+  for (const c of cards) {
+    const r0 = c.getBoundingClientRect();
+    if (r0.width <= 120 || r0.bottom <= 0 || r0.top >= window.innerHeight) continue;
+    if (r0.bottom > bestB) { bestB = r0.bottom; el = c; }
+  }
+  if (!el) return null;
   el.scrollIntoView({ block: 'center', behavior: 'instant' });
   const r = el.getBoundingClientRect();
   return {
@@ -155,11 +178,18 @@ _LATEST_CARD_INFO_JS = """
 
 _LATEST_CARD_SRC_JS = """
 () => {
-  const vids = [...document.querySelectorAll('video')]
-    .filter(v => v.getBoundingClientRect().width > 60);
-  if (!vids.length) return '';
-  const v = vids[vids.length - 1];
-  const s = v.currentSrc || v.src || '';
+  const vis = [...document.querySelectorAll('video')].filter(v => {
+    const r = v.getBoundingClientRect();
+    return r.width > 60 && r.height > 40 && r.bottom > 0 && r.top < window.innerHeight;
+  });
+  if (!vis.length) return '';
+  // 滚动到底后, 视口最靠下(文档序也最靠后)的视频就是最新消息里的; 排除顶部悬浮播放器
+  let best = vis[0], bestBottom = -1e9;
+  for (const v of vis) {
+    const b = v.getBoundingClientRect().bottom;
+    if (b > bestBottom) { bestBottom = b; best = v; }
+  }
+  const s = best.currentSrc || best.src || '';
   return /^https?:\\/\\//.test(s) ? s : '';
 }
 """
@@ -216,15 +246,24 @@ def _click_download_btn(page):
 _MEDIA_HINTS = (
     ".mp4", "/video/tos/", "douyinvod", "zjcdn", "ixigua",
     "aweme/v1/play", "jyvod", "vod.jianying", "bytetos.com/obj/video",
+    # 小云雀真实直链无.mp4后缀: v26-xyq-video.jianying.com/<sign>/<ts>/video/n/everphoto-jianying-assets/<id>/?a=...
+    # 注意: 不能用 everphoto-jianying-assets 作特征——douyinpic 封面图路径同样含它
+    "video.jianying.com", "/video/n/",
+    "download=true",
 )
 
 _MEDIA_BAD_HOSTS = (
     "passport", "/api/", "sts2",
+    # 抖音图床CDN: 小云雀视频封面图走此域名, 路径同样含 everphoto-jianying-assets
+    "douyinpic",
 )
 
 
 def _looks_media(url):
     low = url.lower()
+    # 强特征(.mp4/显式下载参数)优先于坏名单——小云雀下载接口形如 /api/material/<id>?download=true&filename=x.mp4
+    if ".mp4" in low or "download=true" in low:
+        return True
     if any(b in low for b in _MEDIA_BAD_HOSTS):
         return False
     return any(h in low for h in _MEDIA_HINTS)
@@ -322,6 +361,12 @@ def scrape_xiaoyunque_chat(bitclient, settings, source_url, window, wait_seconds
         downloaded = False
         while time.time() < deadline:
             attempt += 1
+            # 虚拟列表: 每轮先滚到底, 促使最新消息块挂载进DOM
+            try:
+                page.evaluate(_SCROLL_BOTTOM_JS)
+            except Exception:
+                pass
+            time.sleep(1)
             try:
                 dom_urls = page.evaluate(_VIDEO_JS) or []
             except Exception:
