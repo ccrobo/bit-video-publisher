@@ -198,6 +198,56 @@ _LATEST_CARD_SRC_JS = """
 }
 """
 
+# 最新视频专用定位(豆包页面结构):
+# 最后一个 .auto-hide-last-sibling-br 节点的父级的下一个兄弟 = 最新回复的视频容器。
+# 视频卡懒挂载: <video><source> 需 hover 促发才注入, 故逐个div派发hover事件,
+# MutationObserver 挂起期间收集 source/video 直链。返回 {found, urls}
+_LAST_VIDEO_HOVER_JS = """
+async () => {
+  const nodes = document.querySelectorAll('.auto-hide-last-sibling-br');
+  if (!nodes.length) return { found: false, urls: [] };
+  const parent = nodes[nodes.length - 1].parentNode;
+  const container = parent.nextElementSibling;
+  if (!container) return { found: false, urls: [] };
+  const urls = [];
+  const push = u => { if (u && /^https?:\\/\\//.test(u) && urls.indexOf(u) === -1) urls.push(u); };
+  const grab = () => {
+    container.querySelectorAll('video').forEach(v => {
+      push(v.currentSrc || v.src || '');
+      v.querySelectorAll('source').forEach(s => push(s.src || s.getAttribute('src')));
+    });
+  };
+  grab();
+  if (urls.length) return { found: true, urls };
+  const obs = new MutationObserver(grab);
+  obs.observe(container, { childList: true, subtree: true });
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const evs = ['mouseenter', 'mouseover', 'pointerenter', 'pointerover'];
+  const divs = [...container.querySelectorAll('div')].slice(0, 40);
+  for (let i = 0; i < divs.length; i++) {
+    for (const t of evs) {
+      try { divs[i].dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true })); } catch (e) {}
+    }
+    await sleep(60);
+  }
+  await sleep(1500);
+  obs.disconnect();
+  grab();
+  return { found: urls.length > 0, urls };
+}
+"""
+
+
+def _hover_last_video_container(page):
+    """优先策略: 豆包最新回复的视频容器直取(hover促发懒挂载source)。返回直链列表"""
+    try:
+        res = page.evaluate(_LAST_VIDEO_HOVER_JS) or {}
+    except Exception:
+        return []
+    if not res.get("found"):
+        return []
+    return [u for u in (res.get("urls") or []) if isinstance(u, str) and u.startswith("http")]
+
 _FIND_DOWNLOAD_JS = """
 () => {
   const els = [...document.querySelectorAll('button, a, [role=button], div, span')]
@@ -508,6 +558,14 @@ def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks,
                 except Exception:
                     ordered = []
                 idx = ordered.index(m) if m in ordered else 0
+                # 最新编号(文档序最后)优先走"视频容器hover直取", 命中即归属, 不再点卡
+                if ordered and m == ordered[-1]:
+                    hover_urls = _hover_last_video_container(page)
+                    if hover_urls:
+                        found[m]["videos"] = _dedupe_media(hover_urls)[:2]
+                        add_log(f"[{window['name']}] 编号[{m}] 经最新视频容器直取得 {len(found[m]['videos'])} 个直链")
+                        woke = True
+                        continue
                 try:
                     pos = page.evaluate(_MARK_CARD_POINT_JS, idx)
                 except Exception:
@@ -771,6 +829,14 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
         downloaded = False
         while time.time() < deadline:
             attempt += 1
+            # 优先策略: 最新回复视频容器(.auto-hide-last-sibling-br 的下一个兄弟)
+            # hover促发懒挂载<video><source>直取直链, 命中即用(无需点击/滚动)
+            if attempt <= 2:
+                hover_urls = _hover_last_video_container(page)
+                if hover_urls:
+                    videos = _dedupe_media(hover_urls)
+                    add_log(f"[{window['name']}] 最新视频容器直取成功: {len(videos)} 个直链")
+                    break
             # 只采集自己打开的聊天页DOM: 遍历全部标签页时, 残留页面的evaluate可能无超时挂起
             try:
                 dom_urls = page.evaluate(_VIDEO_JS) or []
