@@ -23,6 +23,8 @@ class BitClient:
         key = settings.get("bitbrowser_api_key")
         if key:
             self.headers["x-api-key"] = key
+        # 本实例通过 /browser/open 实际新开的窗口id; 复用的已开窗口不属于这里
+        self._owned_wids = set()
 
     # ---------- 基础 ----------
     def healthy(self):
@@ -113,13 +115,44 @@ class BitClient:
         return wins
 
     # ---------- 窗口控制 ----------
+    def window_status(self, wid):
+        """查询窗口是否已打开: True=打开, False=关闭, None=无法确定(接口异常/字段缺失)。"""
+        try:
+            d = self._post("/browser/detail", {"id": wid}) or {}
+        except BitBrowserError:
+            return None
+        st = d.get("status")
+        if isinstance(st, str):
+            s = st.strip().lower()
+            if s in ("1", "open", "opened", "true"):
+                return True
+            if s in ("0", "close", "closed", "false"):
+                return False
+            return None
+        if st is None:
+            return None
+        return bool(int(st))
+
     def open_window(self, wid):
+        wid = str(wid)
+        # 已打开的窗口直接复用调试地址, 不再调 /browser/open, 节省每日开窗次数配额
+        if self.window_status(wid) is True:
+            try:
+                d = self._post("/browser/detail", {"id": wid}) or {}
+            except BitBrowserError:
+                d = {}
+            addr = d.get("ws") or d.get("http") or ""
+            if addr:
+                add_log(f"窗口[{wid}] 已处于打开状态，复用现有调试地址(节省开窗次数)")
+                return self._normalize_cdp(addr)
+            # detail 未返回地址则回退正常打开
         data = self._post("/browser/open", {"id": wid}) or {}
         addr = data.get("ws") or ""
         if not addr:
             addr = data.get("http") or ""
         if not addr:
             raise BitBrowserError(f"打开窗口 {wid} 失败: 未返回调试地址")
+        self._owned_wids.add(wid)
         return self._normalize_cdp(addr)
 
     @staticmethod
@@ -134,4 +167,15 @@ class BitClient:
         return "http://" + addr.split("/")[0]
 
     def close_window(self, wid):
+        """关闭窗口: 仅本客户端实际打开过的才执行, 避免误关复用的已开窗口"""
+        wid = str(wid)
+        if wid not in self._owned_wids:
+            add_log(f"窗口[{wid}] 非本次打开(复用已有窗口)，跳过自动关闭")
+            return
+        self._owned_wids.discard(wid)
         self._post("/browser/close", {"id": wid})
+
+    def force_close(self, wid):
+        """无条件关闭窗口(前端手动操作用)"""
+        self._owned_wids.discard(str(wid))
+        self._post("/browser/close", {"id": str(wid)})

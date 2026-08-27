@@ -20,13 +20,21 @@ def is_ready(pid):
 
 
 def compose_caption(platform, content):
-    """结构化内容 -> 平台发布文案"""
+    """结构化内容 -> 平台发布文案(仅描述+标签)。
+
+    抖音有独立的标题输入框(由 publisher 单独填写), 标题不重复拼进描述,
+    否则成品会同时出现 标题 和 描述首行的重复标题。
+    """
     c = content or {}
-    parts = [c.get("title") or "", c.get("description") or ""]
+    desc = (c.get("description") or "").strip()
+    title = (c.get("title") or "").strip()
+    if title and desc.startswith(title):
+        # 描述若以标题开头则去掉重复
+        desc = desc[len(title):].lstrip("\n：: \t").strip()
     tags = c.get("tags") or []
-    if tags:
-        parts.append(" ".join("#" + str(t).lstrip("#") for t in tags))
-    return "\n".join(p for p in parts if p).strip()
+    if tags and ("#" not in desc):
+        desc = (desc + "\n" + " ".join("#" + str(t).lstrip("#") for t in tags)).strip()
+    return desc or title
 
 
 def publish(platform, bitclient, eff_settings, window, video_path, content):
@@ -36,5 +44,6 @@ def publish(platform, bitclient, eff_settings, window, video_path, content):
     if not is_ready(platform):
         raise PublishError(f"平台[{platform_label(platform)}]即将支持，敬请期待")
     caption = compose_caption(platform, content)
+    title = ((content or {}).get("title") or "").strip()
     add_log(f"[{window['name']}] 准备发布到{platform_label(platform)}")
-    return publish_once(bitclient, eff_settings, window, video_path, caption)
+    return publish_once(bitclient, eff_settings, window, video_path, caption, title=title)

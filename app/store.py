@@ -1,5 +1,6 @@
 """基于 JSON 文件的持久化存储: 设置 / 任务 / 窗口配置 / AI模型 / 提示词库 / 运行状态"""
 import copy
+import datetime as dt
 import json
 import os
 import threading
@@ -106,9 +107,12 @@ TASK_DEFAULTS = {
     "ask_platform": "doubao",  # ai_ask: 提问平台
     "prompt_text": "",  # ai_ask: 要发送的提示词
     "ask_wait": 30,  # ai_ask: 发送后等待生成秒数
-    "ask_daily_limit": 1,  # ai_ask: 每窗口每日提问上限, 0=不限制(AI根据回复判断今日已问次数)
+    "ask_daily_limit": 1,  # ai_ask: 每窗口每日提问上限, 0=不限制
+    "ask_limit_mode": "record",  # ai_ask: 上限判定方式 record=按系统记录(默认,不开窗) | force=忽略今日已达次数,直接开窗提问
     "ask_vars": [],  # ai_ask: 提示词中补充的变量开关: current_time/current_date/window_id/window_name
     "ask_video_mode": False,  # ai_ask: 豆包平台: 注入前切换到"视频生成"模式
+    "ask_wait_consume": True,  # ai_ask: 同窗口同任务存在未消费编号时不重复提问, 等视频发布任务消费后再问
+    "ask_min_age": 10,  # ai_ask: 提问成功至少N分钟后才可被视频发布任务消费, 0=立即可消费
     "source_type": "json",
     "source_url": "",
     "source_window_id": "",
@@ -126,6 +130,9 @@ TASK_DEFAULTS = {
     "url_var": "",  # ai_ask: 引用的窗口变量名(如"对话框URL"), 设置后按变量自动圈定目标窗口并取各窗口URL
     "daily_limit_per_window": 1,
     "close_after_publish": None,
+    # 消费AI提问模式(video_publish): 按任务编号定位提问对应的回复并发布其中视频
+    "consume_ask": False,  # True=启用消费模式(仅豆包/小云雀聊天页源)
+    "consume_ask_task_id": "",  # 绑定的AI提问任务id, 空=消费全部提问任务的编号
 }
 
 
@@ -393,6 +400,130 @@ def delete_var_def(key):
     defs = [d for d in load_var_defs() if d.get("key") != key]
     save_var_defs(defs)
     return defs
+
+
+# ---------------- 提问任务编号登记 ----------------
+# 结构: {编号: {"window_id","date","asked_at","published_at"}}; 用于记录各窗口提问情况并防止重复发布
+
+ASKS_KEEP = 400
+
+
+def load_asks():
+    return _read("asks.json", {})
+
+
+def save_asks(d):
+    # 按 asked_at 保留最新 N 条, 防止无限膨胀
+    items = sorted(d.items(), key=lambda kv: kv[1].get("asked_at", ""))
+    _write("asks.json", dict(items[-ASKS_KEEP:]))
+
+
+def record_ask(mark, window_id, task_id=""):
+    """发送提问成功后登记唯一编号; 重复登记刷新时间"""
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    d = load_asks()
+    old = d.get(mark) or {}
+    d[mark] = {
+        "window_id": str(window_id or ""),
+        "date": time.strftime("%Y-%m-%d"),
+        "asked_at": now,
+        "published_at": old.get("published_at") or "",
+        "task_id": str(task_id or old.get("task_id") or ""),
+    }
+    save_asks(d)
+    return d[mark]
+
+
+def get_ask(mark):
+    return (load_asks().get(mark) or {}).copy()
+
+
+def mark_ask_published(mark, window_id=""):
+    """标记编号已发布(未知编号则补登记); 返回该条记录"""
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    d = load_asks()
+    rec = d.get(mark) or {}
+    rec.setdefault("window_id", "")
+    if window_id and not rec.get("window_id"):
+        rec["window_id"] = str(window_id)
+    rec.setdefault("date", time.strftime("%Y-%m-%d"))
+    rec.setdefault("asked_at", now)
+    if not rec.get("published_at"):
+        rec["published_at"] = now
+    d[mark] = rec
+    save_asks(d)
+    return rec.copy()
+
+
+def list_asks():
+    """按提问时间倒序返回全部登记记录"""
+    items = sorted(load_asks().items(), key=lambda kv: kv[1].get("asked_at", ""), reverse=True)
+    return [{"mark": k, **v} for k, v in items]
+
+
+def count_asks_on_date(date_str, window_id=None, task_id=None):
+    """统计指定日期成功发送的提问次数(仅计入record_ask登记过的; 失败提问未登记不计入)。
+
+    传入 task_id 时严格匹配该任务; 待发布与已发布记录均计入。
+    """
+    n = 0
+    for rec in load_asks().values():
+        if rec.get("date") != date_str:
+            continue
+        if window_id and rec.get("window_id") != str(window_id):
+            continue
+        if task_id and rec.get("task_id") != str(task_id):
+            continue
+        n += 1
+    return n
+
+
+def pending_asks(min_age_seconds=0, window_id=None, task_id=None):
+    """待消费的编号记录: 未发布 且 提问时间距今 >= min_age_seconds。
+
+    可按 window_id / task_id 过滤; 按提问时间升序返回(先问先消费)。
+    """
+    now = time.time()
+    out = []
+    for it in list_asks():
+        if it.get("published_at"):
+            continue
+        if window_id and it.get("window_id") != window_id:
+            continue
+        if task_id is not None and (it.get("task_id") or "") != task_id:
+            continue
+        try:
+            asked = dt.datetime.strptime(it["asked_at"], "%Y-%m-%d %H:%M:%S").timestamp()
+        except Exception:
+            continue
+        if now - asked < min_age_seconds:
+            continue
+        out.append(it)
+    out.sort(key=lambda x: x.get("asked_at", ""))
+    return out
+
+
+def has_pending_ask(window_id, task_id):
+    """同窗口+同提问任务是否还有未消费(未发布)的编号; 有则AI提问应等待, 防止重复提问。"""
+    return bool(pending_asks(min_age_seconds=0, window_id=window_id, task_id=str(task_id or "")))
+
+
+def reset_ask_published(mark):
+    """重置发布状态为未发布(允许该编号回复再次参与发布); 返回记录, 不存在返回 None"""
+    d = load_asks()
+    if mark not in d:
+        return None
+    d[mark]["published_at"] = ""
+    save_asks(d)
+    return d[mark].copy()
+
+
+def delete_ask(mark):
+    d = load_asks()
+    if mark in d:
+        del d[mark]
+        save_asks(d)
+    return True
 
 
 def upsert_window_config(window_id, patch):

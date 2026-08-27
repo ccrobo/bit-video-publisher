@@ -239,6 +239,7 @@
             <el-tag size="small" v-if="row.source_type==='doubao_page'">豆包聊天页</el-tag>
             <el-tag size="small" type="success" v-else-if="row.source_type==='xiaoyunque_page'">小云雀聊天页</el-tag>
             <el-tag size="small" type="info" v-else>JSON接口</el-tag>
+            <el-tag size="small" type="danger" v-if="row.consume_ask">消费</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="AI模型" min-width="130">
@@ -279,6 +280,7 @@
         <el-select v-model="runSelWinId" placeholder="全部关联窗口" clearable filterable style="width:100%">
           <el-option v-for="t in runSelTargets" :key="t.id" :label="`${t.name}（${t.value}）`" :value="t.id"></el-option>
         </el-select>
+        <el-checkbox v-model="runForce" style="margin-top:12px">强制执行（跳过「窗口已打开」跳过逻辑与「消费等待时间」，立即消费未到期编号）</el-checkbox>
         <template #footer>
           <el-button @click="runSelVisible=false">取消</el-button>
           <el-button type="success" @click="confirmRun">{{ runSelWinId ? '仅执行该窗口' : '执行全部窗口' }}</el-button>
@@ -334,6 +336,14 @@
                 <el-switch v-model="taskForm.ask_video_mode"></el-switch>
                 <span class="muted" style="margin-left:8px">进入对话页后先点击豆包的「视频生成」模式 Tab，再发送提示词</span>
               </el-form-item>
+              <el-form-item label="防重复提问">
+                <el-switch v-model="taskForm.ask_wait_consume"></el-switch>
+                <span class="muted" style="margin-left:8px">开启后：该窗口上一条提问编号还没被视频发布任务消费(发布)时，本轮不再提问，等消费完成再问</span>
+              </el-form-item>
+              <el-form-item label="消费等待(分钟)">
+                <el-input-number v-model="taskForm.ask_min_age" :min="0" :max="1440"></el-input-number>
+                <span class="muted" style="margin-left:8px">提问成功至少N分钟后，该编号才可被视频发布任务的「消费AI提问」模式消费（默认10分钟，等AI生成完视频）；0=立即可消费</span>
+              </el-form-item>
               <el-form-item label="发送后等待(秒)">
                 <el-input-number v-model="taskForm.ask_wait" :min="5" :max="600"></el-input-number>
                 <span class="muted" style="margin-left:8px">发送提示词后保持窗口打开的秒数，供AI开始生成</span>
@@ -352,12 +362,31 @@
             <template v-else>
             <el-row :gutter="12">
               <el-col :span="12"><el-form-item label="内容源类型">
-                <el-select v-model="taskForm.source_type" style="width:100%">
+                <el-select v-model="taskForm.source_type" style="width:100%" @change="v=>{ if(v==='json') taskForm.consume_ask=false; }">
                   <el-option label="豆包聊天页(浏览器抓取)" value="doubao_page"></el-option>
                   <el-option label="小云雀聊天页(浏览器抓取)" value="xiaoyunque_page"></el-option>
                   <el-option label="JSON 接口" value="json"></el-option>
                 </el-select>
                 <div class="muted">后续将支持：WorkBuddy / 千问 / 元宝 / 语雀 / 可灵 / 即梦</div>
+              </el-form-item></el-col>
+            </el-row>
+            <el-row v-if="isBrowserSource" :gutter="12">
+              <el-col :span="24"><el-form-item label="抓取模式">
+                <el-radio-group v-model="taskForm.consume_ask">
+                  <el-radio :value="false">常规：抓取每个窗口最新回复发布</el-radio>
+                  <el-radio :value="true">消费AI提问：按任务编号找到对应回复，发布其中的视频</el-radio>
+                </el-radio-group>
+                <template v-if="taskForm.consume_ask">
+                  <el-select v-model="taskForm.consume_ask_task_id" clearable filterable
+                             placeholder="选择要消费的AI提问任务（可不选=消费全部提问任务的编号）"
+                             style="width:100%; margin-top:6px">
+                    <el-option v-for="t in tasks.filter(x=>x.task_type==='ai_ask')" :key="t.id"
+                               :label="`${t.name}（${platformLabel(t.ask_platform)}·变量 ${t.url_var || '-'}）`" :value="t.id"></el-option>
+                  </el-select>
+                  <div class="muted">定时轮询消费：配合下方「执行周期」自动运行。执行时打开各窗口聊天页，按【任务编号】定位
+                    对应提问的回复并发布其中视频；仅消费「提问成功至少10分钟」的条目（等AI生成完毕），按先后顺序逐个消费；
+                    发布成功自动标记已发布、不会重复；尚未生成完视频的编号留到下一轮。窗口需开启抓取发布且已登录对应平台。</div>
+                </template>
               </el-form-item></el-col>
             </el-row>
             <template v-if="!isBrowserSource">
@@ -473,7 +502,14 @@
             <el-row v-if="taskForm.task_type==='ai_ask'" :gutter="12">
               <el-col :span="8"><el-form-item label="每日提问上限">
                 <el-input-number v-model="taskForm.ask_daily_limit" :min="0" :max="50" style="width:100%"></el-input-number>
-                <div class="muted">每个窗口每天最多提问次数，0 表示不限制；需在第1步选择推理模型</div>
+                <div class="muted">每个窗口每天最多提问次数，0 表示不限制</div>
+              </el-form-item></el-col>
+              <el-col :span="8"><el-form-item label="次数判定方式">
+                <el-select v-model="taskForm.ask_limit_mode" style="width:100%">
+                  <el-option label="按系统记录判断(推荐)" value="record"></el-option>
+                  <el-option label="忽略已达次数,直接提问" value="force"></el-option>
+                </el-select>
+                <div class="muted">默认按系统成功提问记录判断今日是否可继续，不打开窗口查询；选直接提问则跳过检查立即开窗</div>
               </el-form-item></el-col>
             </el-row>
           </el-form>
@@ -651,6 +687,42 @@
           <el-button type="primary" @click="savePrompt">保存</el-button>
         </template>
       </el-dialog>
+    </el-tab-pane>
+
+    <!-- ================= 提问记录 ================= -->
+    <el-tab-pane label="提问记录" name="asks">
+      <div class="toolbar">
+        <el-select v-model="askStatusFilter" clearable placeholder="按状态筛选" style="width:150px" size="small">
+          <el-option label="未发布" value="pending"></el-option>
+          <el-option label="已发布" value="published"></el-option>
+        </el-select>
+        <el-input v-model="askKeyword" clearable placeholder="搜编号/窗口名" style="width:200px" size="small"></el-input>
+        <el-button size="small" @click="loadAsks">刷新</el-button>
+        <span class="muted">AI提问自动登记唯一编号；未发布=回复可被抓取发布，已发布=不会再重复发布</span>
+      </div>
+      <el-table :data="filteredAsks" border stripe size="small" max-height="620">
+        <el-table-column prop="mark" label="任务编号" width="180"></el-table-column>
+        <el-table-column prop="window_name" label="窗口" width="160" show-overflow-tooltip></el-table-column>
+        <el-table-column prop="date" label="日期" width="110"></el-table-column>
+        <el-table-column prop="asked_at" label="提问时间" width="170"></el-table-column>
+        <el-table-column label="发布状态" width="170">
+          <template #default="{row}">
+            <el-tag v-if="row.published_at" type="success" size="small">已发布 {{ row.published_at }}</el-tag>
+            <el-tag v-else type="warning" size="small">待发布</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="210" fixed="right">
+          <template #default="{row}">
+            <el-popconfirm v-if="row.published_at" title="重置后该回复可再次参与发布，确定？" @confirm="resetAsk(row)">
+              <template #reference><el-button link type="warning" size="small">重置为未发布</el-button></template>
+            </el-popconfirm>
+            <el-button link type="primary" size="small" @click="copyAskMark(row)">复制编号</el-button>
+            <el-popconfirm title="删除后该编号不再拦截发布，确定？" @confirm="delAsk(row)">
+              <template #reference><el-button link type="danger" size="small">删除</el-button></template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
     </el-tab-pane>
 
     <!-- ================= 运行日志 ================= -->
@@ -940,12 +1012,13 @@ const app = createApp({
     const platformLabel = p => (platformList.find(x=>x.v===p) || {}).label || p;
     const blankTask = () => ({
       id:'', name:'', task_type:'video_publish', platform:'douyin', enabled:true, cron:'0 9 * * *',
-      ask_platform:'doubao', prompt_text:'', ask_wait:30, ask_daily_limit:1, ask_vars:[], ask_video_mode:false,
+      ask_platform:'doubao', prompt_text:'', ask_wait:30, ask_daily_limit:1, ask_limit_mode:'record', ask_vars:[], ask_video_mode:false, ask_wait_consume:true, ask_min_age:10,
       source_type:'doubao_page', source_url:'', source_window_id:'', source_wait:15,
       items_path:'data', field_title:'title', field_video:'video_url',
       fetch_count:1, ai_model_id:'', ai_prompt:'', allow_repeat:true,
       target_group_ids:[], target_window_ids:[], window_vars:{}, url_var:'对话框URL',
-      daily_limit_per_window:1, close_after_publish:null
+      daily_limit_per_window:1, close_after_publish:null,
+      consume_ask:false, consume_ask_task_id:''
     });
     const askPlatformList = [
       { v:'doubao', label:'豆包', ready:true },
@@ -1068,6 +1141,40 @@ const app = createApp({
       if (!p) return;
       taskForm.prompt_text = p.content;
       ElementPlus.ElMessage.success(`已填入「${p.name || '未命名'}」`);
+    }
+
+    // ------- 提问记录(唯一编号登记) -------
+    const asks = ref([]);
+    const askStatusFilter = ref('');
+    const askKeyword = ref('');
+    async function loadAsks(){ try { asks.value = (await api('/api/asks')).items || []; } catch(e){} }
+    const filteredAsks = computed(() => {
+      return (asks.value || []).filter(r => {
+        if (askStatusFilter.value === 'pending' && r.published_at) return false;
+        if (askStatusFilter.value === 'published' && !r.published_at) return false;
+        if (askKeyword.value) {
+          const k = askKeyword.value.toLowerCase();
+          if (!(`${r.mark} ${r.window_name}`.toLowerCase().includes(k))) return false;
+        }
+        return true;
+      });
+    });
+    function copyAskMark(row){
+      const t = row.mark;
+      if (navigator.clipboard) navigator.clipboard.writeText(t).then(
+        () => ElementPlus.ElMessage.success(`已复制 ${t}`),
+        () => ElementPlus.ElMessage.warning(t));
+      else ElementPlus.ElMessage.info(t);
+    }
+    async function resetAsk(row){
+      try { await api('/api/asks/reset', { method:'POST', body: JSON.stringify({ mark: row.mark }) });
+        loadAsks(); ElementPlus.ElMessage.success('已重置为未发布'); }
+      catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
+    }
+    async function delAsk(row){
+      try { await api(`/api/asks/${encodeURIComponent(row.mark)}`, { method:'DELETE' });
+        loadAsks(); ElementPlus.ElMessage.success('已删除记录'); }
+      catch(e) { ElementPlus.ElMessage.error(String(e.message||e)); }
     }
     // 任务弹窗中豆包模式的实际生效目标(仅显式勾选的窗口)
     // 窗口变量: 供任务按变量圈定目标窗口(配置即生效)
@@ -1210,6 +1317,7 @@ const app = createApp({
     const runSelVisible = ref(false);
     const runSelRow = ref(null);
     const runSelWinId = ref('');
+    const runForce = ref(false);
     const runSelTargets = ref([]);
     function taskTargetsOf(row){
       const k = (row.url_var || '').trim();
@@ -1227,6 +1335,7 @@ const app = createApp({
         return;
       }
       runSelWinId.value = '';
+      runForce.value = false;
       loadWinVars();
       runSelVisible.value = true;
     }
@@ -1234,7 +1343,9 @@ const app = createApp({
       const row = runSelRow.value;
       if (!row) return;
       try {
-        const body = runSelWinId.value ? { window_id: runSelWinId.value } : {};
+        const body = {};
+        if (runSelWinId.value) body.window_id = runSelWinId.value;
+        if (runForce.value) body.force = true;
         const j = await api(`/api/tasks/${row.id}/run`, { method:'POST', body: JSON.stringify(body) });
         runSelVisible.value = false;
         ElementPlus.ElMessage.success(j.msg || '已在后台执行');
@@ -1279,6 +1390,7 @@ const app = createApp({
       if (name === 'settings') loadSettings();
       if (name === 'ai') { loadModels(); }
       if (name === 'prompts') { loadPrompts(); }
+      if (name === 'asks') loadAsks();
       if (name === 'windows' && !windows.value.length) syncAll();
     }
 
@@ -1300,7 +1412,7 @@ const app = createApp({
       batchVisible, batchForm, applyBatch, tmap, taskName,
       taskVisible, taskForm, newTask, editTask, copyTask, saveTask, delTask, toggleTask, runTask,
       winVarKeys, varTargets, varCount, loadWinVars,
-      runSelVisible, runSelRow, runSelWinId, runSelTargets, confirmRun,
+      runSelVisible, runSelRow, runSelWinId, runForce, runSelTargets, confirmRun,
       varDefs, varDefVisible, vdForm, openVarDefs, saveVarDef, editVarDef, delVarDef, resetVdForm, varDefOptions, varDefNote, loadVarDefs,
       step, nextStep, prevStep, platformList, platformLabel,
       isAsk, wizardSteps, lastStep, isTargetStep, askPlatformList, taskTypeList, switchTaskType, winVarsSummary,
@@ -1309,6 +1421,7 @@ const app = createApp({
       defaultPromptPreview, loadModels,
       prompts, promptVisible, promptEditing, promptCatFilter, quickPick, promptForm,
       loadPrompts, promptCategories, filteredPrompts, groupedPrompts, newPrompt, editPrompt, savePrompt, delPrompt, applyQuickPrompt,
+      asks, askStatusFilter, askKeyword, filteredAsks, loadAsks, copyAskMark, resetAsk, delAsk,
       loadTasks, loadSettings, saveSettings, pollLogs, clearLogView, onTab,
     };
   }

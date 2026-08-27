@@ -149,7 +149,8 @@ def open_window(wid: str):
 @app.post("/api/windows/{wid}/close")
 def close_window(wid: str):
     try:
-        _bit().close_window(wid)
+        # 前端手动关闭不受"仅关闭自己打开的窗口"限制
+        _bit().force_close(wid)
         return {"ok": True}
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -261,7 +262,8 @@ def run_task_now(tid: str, body: Optional[dict] = Body(default=None)):
     if not store.get_task(tid):
         raise HTTPException(404, "任务不存在")
     only_window = (body or {}).get("window_id")
-    run_async(tid, only_window)
+    force = bool((body or {}).get("force"))
+    run_async(tid, only_window, force)
     return {"ok": True, "msg": "已在后台开始执行，请到【运行日志】查看进展"}
 
 
@@ -445,6 +447,39 @@ def del_var_def(body: dict = Body(...)):
     defs = store.delete_var_def(key)
     add_log(f"变量定义已删除: [{key}]（各窗口已配置的值保留）")
     return {"ok": True, "defs": defs}
+
+
+# ---------------- 提问任务编号(唯一标志) ----------------
+
+@app.get("/api/asks")
+def get_asks():
+    items = store.list_asks()
+    names = {}
+    try:
+        names = {w["id"]: (w.get("name") or "") for w in _bit().list_windows()}
+    except Exception:
+        pass  # 比特浏览器离线时仅显示窗口ID前缀
+    for it in items:
+        it["window_name"] = names.get(it.get("window_id"), "") or f"{(it.get('window_id') or '')[:8]}…"
+    return {"items": items}
+
+
+@app.post("/api/asks/reset")
+def reset_ask(body: dict = Body(...)):
+    mark = str(body.get("mark") or "").strip()
+    if not mark:
+        raise HTTPException(400, "缺少 mark")
+    rec = store.reset_ask_published(mark)
+    if rec is None:
+        raise HTTPException(404, "编号不存在")
+    add_log(f"提问编号[{mark}] 已重置为未发布（可再次参与发布）")
+    return {"ok": True, "record": rec}
+
+
+@app.delete("/api/asks/{mark}")
+def del_ask(mark: str):
+    store.delete_ask(mark)
+    return {"ok": True}
 
 
 @app.put("/api/window-configs")

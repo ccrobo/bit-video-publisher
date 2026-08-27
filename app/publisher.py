@@ -16,13 +16,13 @@ class PublishError(Exception):
     pass
 
 
-def publish_once(bitclient, settings, window, video_path, caption):
-    """打开窗口 -> 进入创作中心 -> 上传 -> 填文案 -> 发布"""
+def publish_once(bitclient, settings, window, video_path, caption, title=""):
+    """打开窗口 -> 进入创作中心 -> 上传 -> 填文案 -> 发布; title 为独立的标题输入框内容"""
     with _publish_lock:
-        _publish(bitclient, settings, window, video_path, caption)
+        _publish(bitclient, settings, window, video_path, caption, title)
 
 
-def _publish(bitclient, settings, window, video_path, caption):
+def _publish(bitclient, settings, window, video_path, caption, title=""):
     shot_dir = BASE_DIR / "data" / "screenshots"
     shot_dir.mkdir(parents=True, exist_ok=True)
     sel = settings.get("selectors") or {}
@@ -63,11 +63,11 @@ def _publish(bitclient, settings, window, video_path, caption):
         editor.wait_for(state="visible", timeout=30000)
         editor.click()
         page.keyboard.insert_text(caption)
-        # 标题为尽力填写(可选成功)
+        # 标题为尽力填写(可选成功): 用结构化标题, 无则退回文案首行
         try:
             ti = page.locator('input[placeholder*="标题"]').first
             if ti.count() > 0:
-                ti.fill(caption.splitlines()[0][:30])
+                ti.fill((title or caption.splitlines()[0])[:30])
         except Exception:
             pass
 

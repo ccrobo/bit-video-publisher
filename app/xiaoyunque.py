@@ -243,6 +243,341 @@ def _click_download_btn(page):
         return False
 
 
+# ---------------- 按任务编号定位指定回复(消费提问模式) ----------------
+# 与豆包同构: 扫描含 任务编号ASK-xxx 的最小块并提取视频/文案。
+# 视频可能在本块内, 也可能在【后续相邻兄弟气泡】(脚本气泡与视频气泡分离的场景)
+
+_MARK_SCAN_JS = """
+() => {
+  const RE = /ASK-\\d{8}-[A-Z0-9]{4,8}/g;
+  const hits = [];
+  for (const el of document.querySelectorAll('div')) {
+    const t = el.innerText || '';
+    if (!t || t.length > 30000) continue;
+    RE.lastIndex = 0;
+    const ms = t.match(RE);
+    if (ms && ms.length) hits.push({el, ms});
+  }
+  // 只留最小块: 不再包含其他命中块的
+  const leaves = hits.filter(h => !hits.some(o => o !== h && h.el.contains(o.el)));
+  const out = [];
+  for (const h of leaves) {
+    const videos = [];
+    const push = u => { if (u && /^https?:\\/\\//.test(u) && !videos.includes(u)) videos.push(u); };
+    const grab = root => {
+      if (!root) return;
+      root.querySelectorAll('video').forEach(v => {
+        push(v.currentSrc || v.src || '');
+        v.querySelectorAll('source').forEach(s => push(s.src));
+      });
+      root.querySelectorAll('a[href]').forEach(a => { if (/\\.mp4($|\\?)/.test(a.href)) push(a.href); });
+    };
+    grab(h.el);
+    if (!videos.length) {
+      // 向上爬到"消息级"容器: 逐层上升直到某层的下一个兄弟包含视频
+      let node = h.el;
+      for (let up = 0; up < 8 && !videos.length && node.parentElement; up++) {
+        let sib = node.nextElementSibling;
+        let hops = 0;
+        while (sib && hops < 3 && !videos.length) {
+          grab(sib);
+          sib = sib.nextElementSibling;
+          hops++;
+        }
+        if (!videos.length) node = node.parentElement;
+      }
+    }
+    out.push({
+      mark: h.ms[h.ms.length - 1],
+      text: (() => {
+        // 文本扩展: 最小编号块只有编号行, 向上爬到"消息级"取完整回复文案。
+        // 爬升边界: 文本>8000字符 或 引入了第二个不同编号(混入其他回复) 即停
+        let el = h.el, best = h.el.innerText || '';
+        for (let up = 0; up < 12; up++) {
+          const p = el.parentElement;
+          if (!p || p === document.body) break;
+          const t = p.innerText || '';
+          if (!t || t.length > 8000) break;
+          RE.lastIndex = 0;
+          const uniq = [...new Set(t.match(RE) || [])];
+          if (uniq.length > 1) break;
+          if (t.length > best.length && t.length < 8000) { best = t; el = p; } else break;
+        }
+        return best.trim();
+      })(),
+      videos,
+    });
+  }
+  return out;
+}
+"""
+
+# 视频可能是独立懒挂载卡(与编号文本气泡不同容器): 与豆包同构, 点击卡组+网络增量归属。
+
+# 返回扫描到的编号按文档序(=时间序)排列的列表, 用于把第k个编号对应到第k组视频卡
+_MARKS_ORDERED_JS = """
+() => {
+  const RE = /ASK-\\d{8}-[A-Z0-9]{4,8}/g;
+  const hits = [];
+  for (const el of document.querySelectorAll('div')) {
+    const t = el.innerText || '';
+    if (!t || t.length > 30000) continue;
+    RE.lastIndex = 0;
+    const ms = t.match(RE);
+    if (ms && ms.length) hits.push({el});
+  }
+  const leaves = hits.filter(h => !hits.some(o => o !== h && o.el.contains(h.el)));
+  const uniq = [];
+  const seen = new Set();
+  for (const l of leaves) {
+    const mk = l.el.innerText.match(RE)[0];
+    if (!seen.has(mk)) { seen.add(mk); uniq.push({mark: mk, el: l.el}); }
+  }
+  uniq.sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
+  return uniq.map(u => u.mark);
+}
+"""
+
+# 按索引取文档序第k张视频卡(k从0开始), 返回点击坐标。
+# 小云雀无稳定卡片类名: 可见<video>元素包裹容器优先, 其次视频特征封面图
+_MARK_CARD_POINT_JS = """
+(k) => {
+  let cards = [...document.querySelectorAll('video')]
+    .map(v => v.closest('[class*="card"],[class*="video"],[class*="item"],[class*="message"],[class*="agent"]') || v)
+    .filter(el => el.getBoundingClientRect().width > 120);
+  if (!cards.length) {
+    cards = [...document.querySelectorAll('img')]
+      .filter(im => /video|cover|thumb|snapshot/i.test(im.src || ''))
+      .map(im => im.closest('[class*="card"],[class*="video"],[class*="item"]') || im.parentElement)
+      .filter(Boolean)
+      .filter(el => el.getBoundingClientRect().width > 120);
+  }
+  if (!cards.length) return null;
+  const el = (k >= 0 && k < cards.length) ? cards[k] : null;
+  if (!el) return null;
+  el.scrollIntoView({block: 'center', behavior: 'instant'});
+  const r = el.getBoundingClientRect();
+  if (r.width < 40) return null;
+  return {x: r.x + r.width / 2,
+          y: Math.max(20, Math.min(r.y + r.height / 2, window.innerHeight - 20)),
+          w: r.width | 0};
+}
+"""
+
+
+def _merge_mark_replies(items):
+    """同编号多条扫描结果归并:
+    编号会同时出现在[用户提问回显]和[AI回复]中, 结构化字段分高的(AI回复)优先,
+    平分时才取文本更长的版本"""
+    merged = {}
+    order = []
+    for it in items or []:
+        mk = it.get("mark")
+        if not mk:
+            continue
+        if mk not in merged:
+            merged[mk] = {"mark": mk, "text": it.get("text") or "", "videos": list(it.get("videos") or [])}
+            order.append(mk)
+            continue
+        cur = merged[mk]
+        if len(it.get("videos") or []) > len(cur["videos"]):
+            cur["videos"] = list(it.get("videos") or [])
+        nt = it.get("text") or ""
+        ct = cur.get("text") or ""
+        if _reply_score(nt) > _reply_score(ct) or (
+            _reply_score(nt) == _reply_score(ct) and len(nt) > len(ct)
+        ):
+            cur["text"] = nt
+    return [merged[k] for k in order]
+
+
+# 提问回复的结构化字段特征: 含这些标记越多越可能是"AI回复"(而非回显的提问原文)
+_REPLY_FIELD_MARKS = (
+    "【标题】", "【描述】", "【新闻事件】", "【热点解读】",
+    "【完整视频脚本】", "【旁白】",
+)
+
+# AI回复专属强特征: 首行原样输出任务编号(提示词强制要求); 生成时间为真实时间值而非说明文字
+_REPLY_HEAD_RE = re.compile(r"^\s*(?:任务编号[:：]\s*)?ASK-\d{8}-[A-Z0-9]{4,8}", re.M)
+_REPLY_TIMEVAL_RE = re.compile(r"【生成时间】[^【\r\n]*\d{1,2}:\d{2}")
+
+
+def _reply_score(text):
+    """区分AI回复与提问回显: 回显也会含全部字段名(模板), 因此用AI回复专属特征加权"""
+    t = text or ""
+    s = sum(1 for m in _REPLY_FIELD_MARKS if m in t)
+    if _REPLY_HEAD_RE.search(t):
+        s += 10
+    if _REPLY_TIMEVAL_RE.search(t):
+        s += 5
+    return s
+
+
+def find_xiaoyunque_replies_by_marks(bitclient, settings, source_url, window, marks, wait_seconds=15):
+    """打开小云雀聊天页, 定位包含指定任务编号的回复块。
+
+    返回 [{"mark", "text", "videos"}](仅含找到的编号; 未找到/暂无视频的不返回)。
+    """
+    addr = bitclient.open_window(window["id"])
+    cdp = addr if addr.startswith("http") else "http://" + addr
+    pw = None
+    page = None
+    ctx = None
+    browser = None
+    try:
+        add_log(f"[{window['name']}] 打开小云雀聊天页消费提问(查找 {len(marks)} 个编号): {source_url}")
+        pw = sync_playwright().start()
+        browser = pw.chromium.connect_over_cdp(cdp, timeout=30000)
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = ctx.new_page()
+
+        # 监听网络响应: 视频卡是懒挂载占位卡, 点击播放/下载后直链才流经网络
+        net_urls = []  # [(time, url)]
+
+        def _on_response(resp):
+            try:
+                u = resp.url or ""
+                ct = (resp.headers or {}).get("content-type", "") or ""
+            except Exception:
+                return
+            if _looks_media(u) or ct.lower().startswith("video/"):
+                net_urls.append((time.time(), u))
+
+        try:
+            ctx.on("response", _on_response)
+        except Exception:
+            page.on("response", _on_response)
+
+        page.goto(source_url, wait_until="domcontentloaded", timeout=60000)
+        cur = page.url or ""
+        if "/login" in cur or "passport" in cur:
+            raise XiaoyunqueScrapeError(
+                f"窗口[{window['name']}] 未登录小云雀，请先在该窗口手动登录 jianying.com"
+            )
+        try:
+            page.wait_for_load_state("networkidle", timeout=20000)
+        except Exception:
+            pass
+
+        want = [m for m in marks if m]
+        found = {}
+        deadline = time.time() + max(20, int(wait_seconds or 15)) + 30
+        rounds = 0
+        while time.time() < deadline and len(found) < len(want):
+            rounds += 1
+            # 虚拟列表: 先滚到底让最新消息挂载
+            try:
+                page.evaluate(_SCROLL_BOTTOM_JS)
+            except Exception:
+                pass
+            time.sleep(1)
+            try:
+                items = page.evaluate(_MARK_SCAN_JS) or []
+            except Exception:
+                items = []
+            for it in _merge_mark_replies(items):
+                mk = it["mark"]
+                if mk not in want:
+                    continue
+                old = found.get(mk)
+                if not old:
+                    found[mk] = dict(it)
+                elif _reply_score(it["text"]) > _reply_score(old["text"]) or (
+                    _reply_score(it["text"]) == _reply_score(old["text"])
+                    and (len(it["videos"]) > len(old["videos"])
+                         or len(it["text"]) > len(old["text"]))
+                ):
+                    src_reply = it if _reply_score(it["text"]) >= _reply_score(old["text"]) else old
+                    found[mk] = {
+                        "mark": mk,
+                        "text": src_reply["text"],
+                        "videos": it["videos"] or old["videos"],
+                    }
+            remaining = [m for m in want if m not in found or not found[m]["videos"]]
+            if not remaining:
+                break
+            # 已定位文本但缺视频: 视频卡是独立懒挂载卡, 与编号文本气泡不属同一容器。
+            # 编号时间序与页面视频卡组顺序一一对应 -> 按文档序把第k个待消费编号对到第k张视频卡,
+            # 真实鼠标点击促发挂载/播放, 网络监听捕获的增量直链归属该编号。
+            woke = False
+            for m in remaining:
+                if m not in found:
+                    continue
+                try:
+                    ordered = page.evaluate(_MARKS_ORDERED_JS) or []
+                except Exception:
+                    ordered = []
+                idx = ordered.index(m) if m in ordered else 0
+                try:
+                    pos = page.evaluate(_MARK_CARD_POINT_JS, idx)
+                except Exception:
+                    pos = None
+                if not pos:
+                    continue
+                cursor = time.time()
+                try:
+                    page.mouse.move(pos["x"], pos["y"])
+                    time.sleep(0.8)
+                    page.mouse.click(pos["x"], pos["y"])
+                    woke = True
+                    time.sleep(5)
+                    delta = [u for t, u in net_urls if t >= cursor]
+                    if delta and not found[m]["videos"]:
+                        seen_ = set()
+                        uniq = []
+                        for u in delta:
+                            k_ = _media_key(u)
+                            if k_ not in seen_:
+                                seen_.add(k_)
+                                uniq.append(u)
+                        found[m]["videos"] = uniq[:2]
+                        add_log(f"[{window['name']}] 点击编号[{m}]的视频卡后捕获到 {len(found[m]['videos'])} 个视频直链")
+                    elif rounds >= 2 and not found[m]["videos"]:
+                        dl = page.evaluate(_FIND_DOWNLOAD_JS)
+                        if dl:
+                            cursor2 = time.time()
+                            page.mouse.click(dl["x"], dl["y"])
+                            add_log(f"[{window['name']}] 已点击下载按钮获取编号[{m}]的视频直链...")
+                            time.sleep(5)
+                            delta = [u for t, u in net_urls if t >= cursor2]
+                            if delta and not found[m]["videos"]:
+                                found[m]["videos"] = delta[:2]
+                except Exception:
+                    pass
+            if woke:
+                continue
+            # 更早的历史编号需要向上滚加载
+            try:
+                page.evaluate(_SCROLL_UP_JS)
+            except Exception:
+                pass
+            time.sleep(3)
+
+        out = [found[m] for m in want if m in found]
+        with_vid = sum(1 for m in want if (found.get(m) or {}).get("videos"))
+        add_log(f"[{window['name']}] 编号定位完成: 找到 {len(out)}/{len(want)} 个(带视频 {with_vid} 个)")
+        return out
+    finally:
+        if page is not None:
+            try:
+                page.close(timeout=5000)
+            except Exception:
+                pass
+        if pw is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+            try:
+                pw.stop()
+            except Exception:
+                pass
+        try:
+            bitclient.close_window(window["id"])
+        except Exception:
+            pass
+
+
 _MEDIA_HINTS = (
     ".mp4", "/video/tos/", "douyinvod", "zjcdn", "ixigua",
     "aweme/v1/play", "jyvod", "vod.jianying", "bytetos.com/obj/video",
