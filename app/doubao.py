@@ -303,24 +303,53 @@ def _click_download_btn(page):
 # (仅一句"你的视频生成好了。"+<video src=直链>, 视频直链为 douyin.com/video/tos/ 形式)
 # 扫描含 任务编号:ASK-xxx 的"最小块", 取块内+其后兄弟块的视频。
 
+# 编号块搜索通用过滤: 排除 fixed/sticky 悬浮区(侧边栏"最近对话"摘要也含编号,
+# 会让编号定位/卡序判定全部歪掉), 只认主消息流内的块
+_MARK_SCOPE_JS = """
+  const inFixed = el => {
+    for (let n = el; n && n !== document.body; n = n.parentElement) {
+      const ps = getComputedStyle(n).position;
+      if (ps === 'fixed' || ps === 'sticky') return true;
+    }
+    return false;
+  };
+"""
+
 # 扫描全部候选块中包含 任务编号:ASK-xxx 的"最小块"(不含同样含编号的子元素),
 # 返回 [{mark, text, videos:[直链]}]; 视频 = 块内 + 后续兄弟消息块内的 video/source/a
 _MARK_SCAN_JS = """
 () => {
   const RE = /ASK-\\d{8}-[A-Z0-9]{4,8}/g;
+""" + _MARK_SCOPE_JS + """
   const hits = [];
   for (const el of document.querySelectorAll('div')) {
     const t = el.innerText || '';
     if (!t || t.length > 30000) continue;
+    if (inFixed(el)) continue;
     RE.lastIndex = 0;
     const ms = t.match(RE);
     if (ms && ms.length) hits.push({el, ms});
   }
   // 只留最小块: 不再包含其他命中块的
   const leaves = hits.filter(h => !hits.some(o => o !== h && h.el.contains(o.el)));
-  // 消息级容器 = 最小编号块向上找包含完整回复文案的祖先(inner>=100字且不是整页)
+  // 防御: 同时含多个不同编号的leaf是"消息列表大容器"塌缩产物, 内部消息级候选全被吞掉
+  // -> 把leaf内每个编号的最小命中块补回候选; 塌缩leaf本身丢弃(全文混合多轮回复, 不能作文案)。
+  // 注意不能全局按"每编号最小块"砍候选: 输入框草稿模板块比AI回复气泡更小, 会挤掉真回复
+  const multi = leaves.filter(h => new Set(h.ms).size > 1);
+  let scanList = leaves.filter(h => !multi.includes(h));
+  if (multi.length) {
+    const byMark = new Map();
+    for (const h of hits) {
+      if (!multi.some(m => m.el.contains(h.el) && m.el !== h.el)) continue;
+      for (const mk of h.ms) {
+        const cur = byMark.get(mk);
+        if (!cur || cur.el.contains(h.el)) byMark.set(mk, h);
+      }
+    }
+    for (const h of byMark.values()) if (!scanList.includes(h)) scanList.push(h);
+  }
   const out = [];
-  for (const h of leaves) {
+  for (const h of scanList) {
     const videos = [];
     const push = u => { if (u && /^https?:\\/\\//.test(u) && !videos.includes(u)) videos.push(u); };
     const grab = root => {
@@ -361,7 +390,7 @@ _MARK_SCAN_JS = """
           RE.lastIndex = 0;
           const uniq = [...new Set(t.match(RE) || [])];
           if (uniq.length > 1) break;
-          if (t.length > best.length && t.length < 8000) { best = t; el = p; } else break;
+          if (t.length >= best.length) { if (t.length > best.length) best = t; el = p; } else break;
         }
         return best.trim();
       })(),
@@ -376,31 +405,64 @@ _MARK_SCAN_JS = """
 _MARKS_ORDERED_JS = """
 () => {
   const RE = /ASK-\\d{8}-[A-Z0-9]{4,8}/g;
+""" + _MARK_SCOPE_JS + """
   const hits = [];
   for (const el of document.querySelectorAll('div')) {
     const t = el.innerText || '';
     if (!t || t.length > 30000) continue;
+    if (inFixed(el)) continue;
     RE.lastIndex = 0;
     const ms = t.match(RE);
     if (ms && ms.length) hits.push({el});
   }
-  const leaves = hits.filter(h => !hits.some(o => o !== h && o.el.contains(h.el)));
-  const uniq = [];
-  const seen = new Set();
-  for (const l of leaves) {
-    const mk = l.el.innerText.match(RE)[0];
-    if (!seen.has(mk)) { seen.add(mk); uniq.push({mark: mk, el: l.el}); }
+  // 每个编号取最小命中块: contains 剪枝会把"同时含多个编号的大容器"塌缩成
+  // 唯一叶子, uniq 只取其文本第一个编号, 其余编号全部丢失
+  const byMark = new Map();
+  for (const h of hits) {
+    RE.lastIndex = 0;
+    const ms = h.el.innerText.match(RE) || [];
+    for (const mk of ms) {
+      const cur = byMark.get(mk);
+      if (!cur || cur.el.contains(h.el)) byMark.set(mk, {mark: mk, el: h.el});
+    }
   }
+  const uniq = [...byMark.values()];
   // compareDocumentPosition 排序: 文档序在前者优先
   uniq.sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
   return uniq.map(u => u.mark);
 }
 """
 
-# 按索引取文档序第k张"block-video"播放器卡(k从0开始), 返回点击坐标。
-# 豆包每次生成产生一组卡[封面image-box-grid-item + 视频block-video]; 编号时间序与卡组顺序一一对应
+# 按编号定位其对应的播放器卡并返回点击坐标。
+# 优先: 找到该编号文档序最后一次出现的块, 取其之后最近的一张"block-video"卡
+# (豆包流程为 提问回显->AI回复携带视频卡, 编号最后出现处的下方即本轮视频);
+# 其他编号(如已消费任务)的视频卡不参与, 避免虚拟列表部分挂载时"第k张卡"错位。
+# 编号块未挂载或其后无卡时, 回退为按全局卡序取第k张(与编号文档序一一对应)。
 _MARK_CARD_POINT_JS = """
-(k) => {
+([mk, k]) => {
+""" + _MARK_SCOPE_JS + """
+  const TIMEVAL = /【生成时间】[^【\\r\\n]*\\d{1,2}:\\d{2}/;
+  const nFields = t => (t.match(/【(?:标题|描述|新闻事件|热点解读|完整视频脚本|旁白)】/g) || []).length;
+  const hits = [];
+  for (const el of document.querySelectorAll('div')) {
+    const t = el.innerText || '';
+    if (!t || t.length > 30000) continue;
+    if (t.indexOf(mk) < 0) continue;
+    if (inFixed(el)) continue;
+    hits.push(el);
+  }
+  // 锚点 = 文档序最后一个"AI回复样"命中块(含真实生成时间或>=2个字段标记)。
+  // 不做 contains 剪枝(大容器塌缩会让锚点失效), 也不用"最后出现"——
+  // 输入框草稿/提问回显(模板文本)也含编号且位置最靠下, 会把锚点带进无卡区域
+  let anchor = null;
+  const replies = hits.filter(el => TIMEVAL.test(el.innerText) || nFields(el.innerText) >= 2);
+  const pool = replies.length ? replies : hits;
+  if (pool.length) {
+    anchor = pool[0];
+    for (const l of pool) {
+      if (anchor.compareDocumentPosition(l) & Node.DOCUMENT_POSITION_FOLLOWING) anchor = l;
+    }
+  }
   let cards = [...document.querySelectorAll('[class*="block-video"],[class*="image-box-grid-item"]')]
     .filter(el => el.getBoundingClientRect().width > 40);
   if (!cards.length) {
@@ -410,7 +472,15 @@ _MARK_CARD_POINT_JS = """
   }
   if (!cards.length) return null;
   const bv = cards.filter(c => /block-video/.test((c.className || '').toString()));
-  const el = (k >= 0 && k < bv.length) ? bv[k] : (k < cards.length ? cards[k] : null);
+  let el = null;
+  if (anchor) {
+    const after = (bv.length ? bv : cards)
+      .filter(c => anchor.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING);
+    if (after.length) el = after[0];
+  }
+  if (!el) {
+    el = (k >= 0 && k < bv.length) ? bv[k] : (k < cards.length ? cards[k] : null);
+  }
   if (!el) return null;
   el.scrollIntoView({block: 'center', behavior: 'instant'});
   const r = el.getBoundingClientRect();
@@ -418,6 +488,29 @@ _MARK_CARD_POINT_JS = """
   return {x: r.x + r.width / 2,
           y: Math.max(20, Math.min(r.y + r.height / 2, window.innerHeight - 20)),
           w: r.width | 0};
+}
+"""
+
+# 从指定坐标处的播放器卡DOM直取视频直链: elementFromPoint -> 最近播放器卡 -> video/source/a.mp4。
+# 卡是按编号锚定后选中的, 归属明确; 网络监听会把同页其他卡促发的请求也记进来, 只作兜底
+_CARD_SRC_AT_POINT_JS = """
+([x, y]) => {
+  const urls = [];
+  const push = u => { if (u && /^https?:\\/\\//.test(u) && !urls.includes(u)) urls.push(u); };
+  const grab = root => {
+    if (!root) return;
+    if (root.tagName === 'VIDEO') push(root.currentSrc || root.src || '');
+    root.querySelectorAll('video').forEach(v => {
+      push(v.currentSrc || v.src || '');
+      v.querySelectorAll('source').forEach(s => push(s.src));
+    });
+    root.querySelectorAll('a[href]').forEach(a => { if (/\\.mp4($|\\?)/.test(a.href)) push(a.href); });
+  };
+  const ep = document.elementFromPoint(x, y);
+  if (!ep) return '';
+  if (ep.tagName === 'VIDEO') { grab(ep); return urls[0] || ''; }
+  grab(ep.closest('[class*="block-video"],[class*="image-box-grid-item"]'));
+  return urls[0] || '';
 }
 """
 
@@ -470,13 +563,37 @@ def _merge_mark_replies(items):
     return [merged[k] for k in order]
 
 
-def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks, wait_seconds=15):
+_ASK_LINE_RE = re.compile(r"ASK-\d{8}-[A-Z0-9]{4,8}")
+
+
+# 提问模板特征(输入框草稿/提问回显都会带, 真实AI回复不含)
+_THIN_TEMPLATE_HINTS = ("系统附加要求", "归档追踪", "必须在回复正文的最前面")
+
+
+def _thin_text(text, min_len=30):
+    """回复文本是否单薄: 剥离含任务编号的行后有效内容过短。
+
+    场景: 编号所在叶子块向上爬升时被其他编号/超长文本阻断, 只定位到编号行
+    而没拿到完整回复(带【标题】【描述】的正文可能在未挂载的历史消息里)。
+    另: 输入框草稿/提问回显的模板文本(系统附加要求等)视为单薄, 不算有效回复。
+    """
+    body = "\n".join(
+        ln for ln in (text or "").splitlines() if not _ASK_LINE_RE.search(ln)
+    )
+    if len(body.strip()) < min_len:
+        return True
+    return "【标题】" not in text and any(h in text for h in _THIN_TEMPLATE_HINTS)
+
+
+def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks, wait_seconds=15, keep_open=False):
     """打开豆包聊天页, 在历史消息中定位包含指定任务编号的回复块。
 
     返回 [{"mark", "text", "videos"}](仅含找到的编号; 未找到/暂无视频的不返回)。
+    keep_open=True: 成功时保留窗口并在 window["_cdp_addr"] 附带调试地址, 供发布阶段复用。
     """
     addr = bitclient.open_window(window["id"])
     cdp = addr if addr.startswith("http") else "http://" + addr
+    ok = False
     pw = None
     page = None
     ctx = None
@@ -518,7 +635,12 @@ def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks,
         found = {}
         deadline = time.time() + max(20, int(wait_seconds or 15)) + 30
         rounds = 0
-        while time.time() < deadline and len(found) < len(want):
+
+        def _complete(m):
+            f = found.get(m) or {}
+            return bool(f.get("videos")) and not _thin_text(f.get("text"))
+
+        while time.time() < deadline and not all(_complete(m) for m in want):
             rounds += 1
             try:
                 items = page.evaluate(_MARK_SCAN_JS) or []
@@ -543,15 +665,18 @@ def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks,
                         "text": src_reply["text"],
                         "videos": it["videos"] or old["videos"],
                     }
-            remaining = [m for m in want if m not in found or not found[m]["videos"]]
+            remaining = [m for m in want if not _complete(m)]
             if not remaining:
                 break
             # 已定位文本但缺视频: 豆包视频卡是独立懒挂载卡, 与编号文本气泡不属同一容器。
             # 编号时间序与页面视频卡组顺序一一对应 -> 按文档序把第k个待消费编号对到第k张播放器卡,
             # 真实鼠标点击促发挂载/播放, 网络监听捕获的增量直链归属该编号。
+            # 缺完整文本(仅拿到编号行)时: 滚动加载历史消息, 重扫后由归并逻辑补齐文本。
             woke = False
             for m in remaining:
                 if m not in found:
+                    continue
+                if found[m]["videos"]:
                     continue
                 try:
                     ordered = page.evaluate(_MARKS_ORDERED_JS) or []
@@ -567,15 +692,28 @@ def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks,
                         woke = True
                         continue
                 try:
-                    pos = page.evaluate(_MARK_CARD_POINT_JS, idx)
+                    pos = page.evaluate(_MARK_CARD_POINT_JS, [m, idx])
                 except Exception:
                     pos = None
                 if not pos:
                     continue
-                cursor = time.time()
                 try:
+                    # hover促发懒挂载后从卡DOM直取直链: 卡按编号锚定, 归属明确
                     page.mouse.move(pos["x"], pos["y"])
                     time.sleep(0.8)
+                    card_src = page.evaluate(_CARD_SRC_AT_POINT_JS, [pos["x"], pos["y"]])
+                    if not card_src:
+                        time.sleep(1.5)
+                        card_src = page.evaluate(_CARD_SRC_AT_POINT_JS, [pos["x"], pos["y"]])
+                    if card_src:
+                        found[m]["videos"] = [card_src]
+                        add_log(f"[{window['name']}] 编号[{m}] 从编号下方视频卡直取得直链(卡内匹配)")
+                        woke = True
+                        continue
+                except Exception:
+                    pass
+                cursor = time.time()
+                try:
                     page.mouse.click(pos["x"], pos["y"])
                     woke = True
                     time.sleep(5)
@@ -617,6 +755,7 @@ def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks,
             f"[{window['name']}] 编号定位完成: 找到 {len(out)}/{len(want)} 个"
             f"(带视频 {sum(1 for v in get_mark.values() if v)} 个)"
         )
+        ok = True
         return out
     finally:
         if page is not None:
@@ -633,10 +772,15 @@ def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks,
                 pw.stop()
             except Exception:
                 pass
-        try:
-            bitclient.close_window(window["id"])
-        except Exception:
-            pass
+        if keep_open and ok:
+            # 保留窗口, 附带调试地址供发布阶段直接复用(省一次关开窗)
+            window["_cdp_addr"] = cdp
+            add_log(f"[{window['name']}] 编号定位完成，窗口保持打开等待发布阶段复用")
+        else:
+            try:
+                bitclient.close_window(window["id"])
+            except Exception:
+                pass
 
 _BAD_WORDS = (
     "复制", "重新生成", "重新回答", "发送", "收藏", "点赞", "点踩", "举报",
@@ -770,10 +914,14 @@ def _parse_captions(text):
     return result[:30]
 
 
-def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15):
-    """在指定窗口中打开豆包聊天页, 返回 (视频URL列表[最新在前], 候选文案列表)"""
+def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15, keep_open=False):
+    """在指定窗口中打开豆包聊天页, 返回 (视频URL列表[最新在前], 候选文案列表)。
+
+    keep_open=True: 成功时保留窗口并在 window["_cdp_addr"] 附带调试地址, 供发布阶段复用。
+    """
     addr = bitclient.open_window(window["id"])
     cdp = addr if addr.startswith("http") else "http://" + addr
+    ok = False
     pw = None
     page = None
     try:
@@ -925,6 +1073,7 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                 "未能从页面提取到视频链接。请确认该聊天已生成视频、抓取窗口已登录豆包，"
                 "或适当调大【等待加载】秒数"
             )
+        ok = True
         return videos, captions
     finally:
         if page is not None:
@@ -951,8 +1100,13 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15)
                 pw.stop()
             except Exception:
                 pass
-        try:
-            bitclient.close_window(window["id"])
-            add_log(f"[{window['name']}] 抓取完成，窗口已关闭")
-        except Exception:
-            pass
+        if keep_open and ok:
+            # 保留窗口, 附带调试地址供发布阶段直接复用(省一次关开窗)
+            window["_cdp_addr"] = cdp
+            add_log(f"[{window['name']}] 抓取完成，窗口保持打开等待发布阶段复用")
+        else:
+            try:
+                bitclient.close_window(window["id"])
+                add_log(f"[{window['name']}] 抓取完成，窗口已关闭")
+            except Exception:
+                pass

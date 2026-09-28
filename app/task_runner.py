@@ -42,6 +42,12 @@ def resolve_targets_by_var(var_key, windows, wvars=None):
     return out
 
 
+def _oneline(text, n=150):
+    """压缩为单行并截断, 用于日志预览长文本"""
+    s = re.sub(r"\s+", " ", (text or "")).strip()
+    return s[:n] + ("…" if len(s) > n else "")
+
+
 def _fallback_content(material):
     """AI不可用时兜底: 取材料中最长的一段文字作为描述"""
     first = ""
@@ -78,7 +84,12 @@ def prepare_content(task, settings, material, win_name):
     """材料 -> 结构化发布内容 {title, description, tags}; AI失败时原文兜底"""
     model = _pick_model(task)
     if not model:
+        add_log(f"[{win_name}] 未请求AI模型，使用原始文案兜底: 标题[{_fallback_content(material)['title']}]")
         return _fallback_content(material)
+    add_log(
+        f"[{win_name}] 请求AI模型[{model['name']}]整理发布内容, "
+        f"材料({len(material or '')}字): {_oneline(material, 120)}"
+    )
     try:
         content = refine_content(
             model,
@@ -89,7 +100,10 @@ def prepare_content(task, settings, material, win_name):
     except Exception as e:
         add_log(f"[{win_name}] AI整理失败({e})，使用原始文案兜底", "warning")
         return _fallback_content(material)
-    add_log(f"[{win_name}] AI整理完成: {content['title']} | 标签{len(content['tags'])}个")
+    add_log(
+        f"[{win_name}] AI整理完成: 标题[{content['title']}] "
+        f"描述[{_oneline(content['description'], 80)}] 标签{len(content['tags'])}个"
+    )
     return content
 
 
@@ -104,6 +118,18 @@ def _finish_rec(state, rec, ok, err=None):
     if err:
         rec["error"] = str(err)[:300]
     store.save_state(state)
+
+
+def _close_leftover_window(bit, window, published):
+    """窗口复用模式: 本窗口结束时若一次都没发布成功, 关闭抓取阶段留下的窗口。
+
+    否则窗口保持打开会导致下一轮调度被[窗口已打开]门禁跳过。"""
+    if published:
+        return
+    try:
+        bit.close_window(window["id"])
+    except Exception:
+        pass
 
 
 def gate_targets_by_enabled(targets, configs):
@@ -273,7 +299,7 @@ def run_task(task_id, only_window_id=None, force=False):
     if targets and not force:
         targets, open_skipped = gate_targets_by_open(bit, targets, name)
         if only_window_id and not targets and open_skipped:
-            add_log(f"[{name}] 指定的窗口处于打开状态，已跳过本次执行（关闭窗口后重试）", "error")
+            add_log(f"[{name}] 指定的窗口处于打开状态，已跳过本次执行（关闭窗口后重试或勾选强制执行）", "error")
             return
 
     # AI提问任务: 独立流程(打开对话框URL发送提示词)
@@ -281,7 +307,7 @@ def run_task(task_id, only_window_id=None, force=False):
         if not targets:
             add_log(f"[{name}] 没有可执行的目标窗口（请选择URL变量或在窗口管理中开启并绑定）", "error")
             return
-        run_ai_ask(task, bit, settings, targets)
+        run_ai_ask(task, bit, settings, targets, force=force)
         return
 
     if not targets:
@@ -338,13 +364,23 @@ def run_task(task_id, only_window_id=None, force=False):
                 continue
             dkey = f"{w['id']}|{_today()}"
             used = state.setdefault("daily", {}).get(dkey, 0)
+            # 每轮只消费最新的一个待发布编号(无论是否强制执行):
+            # 积压编号等最新编号消费完后, 后续轮次按时间序逐轮消化, 避免一轮发布多个视频
+            pend_total = len(pend)
+            pend = pend[-1:]
+            if pend_total > 1:
+                add_log(
+                    f"[{name}] 窗口[{w['name']}] 待消费编号{pend_total}个, "
+                    f"本轮只消费最新的[{pend[0]['mark']}]，其余编号后续轮次逐轮消化"
+                )
             marks = [a["mark"] for a in pend]
             try:
-                replies = finder(bit, settings, src, w, marks, wait_s)
+                replies = finder(bit, settings, src, w, marks, wait_s, keep_open=True)
             except Exception as e:
                 add_log(f"[{name}] 窗口[{w['name']}] 编号定位失败: {e}", "error")
                 continue
             got = {r["mark"]: r for r in replies}
+            pub_w = 0
             for a in pend:
                 mk = a["mark"]
                 if limit > 0 and used >= limit:
@@ -359,10 +395,17 @@ def run_task(task_id, only_window_id=None, force=False):
                     add_log(f"[{name}] 窗口[{w['name']}] 编号[{mk}] 暂无视频(可能仍在生成)，下轮再试")
                     continue
                 _, material, _pub = analyze_ask_mark(r.get("text") or "")
+                add_log(
+                    f"[{w['name']}] 编号[{mk}] 抓取到回复内容({len(material or '')}字): {_oneline(material, 150)}"
+                )
                 # 回复自带【标题】/【描述】时直接采用(与提问内容严格对应); 缺字段才退回AI整理
                 content = ask_direct_content(material)
                 if content:
-                    add_log(f"[{w['name']}] 编号[{mk}] 使用回复自带标题描述: {content['title']}")
+                    add_log(
+                        f"[{w['name']}] 编号[{mk}] 使用回复自带标题描述(未请求AI模型): "
+                        f"标题[{content['title']}] 描述[{_oneline(content['description'], 80)}] "
+                        f"标签{len(content['tags'])}个"
+                    )
                 else:
                     content = prepare_content(task, settings, material or f"任务编号{mk}", w["name"])
                 try:
@@ -401,11 +444,14 @@ def run_task(task_id, only_window_id=None, force=False):
                     store.mark_ask_published(mk, w["id"])
                     _finish_rec(state, rec, True)
                     ok_cnt += 1
+                    pub_w += 1
                     add_log(f"[{name}] 窗口[{w['name']}] 编号[{mk}] 已发布并标记，不再重复消费")
                 except Exception as e:
                     _finish_rec(state, rec, False, e)
                     fail_cnt += 1
                     add_log(f"[{name}] 窗口[{w['name']}] 编号[{mk}] 发布失败: {e}", "error")
+            # 窗口复用兜底: 本窗口未发布成功则关闭抓取阶段留下的窗口
+            _close_leftover_window(bit, w, pub_w)
         add_log(f"[{name}] 本轮结束: 成功 {ok_cnt} 个视频, 失败 {fail_cnt} 次")
         return
 
@@ -427,10 +473,11 @@ def run_task(task_id, only_window_id=None, force=False):
                 add_log(f"[{name}] 窗口[{w['name']}] 今日已达上限({limit})，跳过")
                 continue
             try:
-                vids, caps = scrape_fn(bit, settings, src, w, wait_s)
+                vids, caps = scrape_fn(bit, settings, src, w, wait_s, keep_open=True)
             except Exception as e:
                 add_log(f"[{name}] 窗口[{w['name']}] 抓取失败: {e}", "error")
                 continue
+            pub_w = 0
 
             # 页面关键文字 -> AI整理为结构化发布内容(每窗口一次, 复用于本批视频)
             # 提问编号门禁: 最新回复若带编号且已发布过 -> 不重复发布; 编号行从AI材料中剥离
@@ -440,8 +487,21 @@ def run_task(task_id, only_window_id=None, force=False):
                     f"[{name}] 窗口[{w['name']}] 最新回复已发布过(任务编号[{ask_mark}])，"
                     f"跳过等待新提问（重复发布需重新提问获取新编号）",
                 )
+                _close_leftover_window(bit, w, pub_w)
                 continue
-            content = prepare_content(task, settings, material, w["name"])
+            # 回复自带【标题】/【描述】时直接采用(与提问内容严格对应); 缺字段才退回AI整理
+            add_log(
+                f"[{w['name']}] 最新回复内容({len(material or '')}字, 编号[{ask_mark or '无'}]): {_oneline(material, 150)}"
+            )
+            content = ask_direct_content(material)
+            if content:
+                add_log(
+                    f"[{w['name']}] 使用回复自带标题描述(未请求AI模型): "
+                    f"标题[{content['title']}] 描述[{_oneline(content['description'], 80)}] "
+                    f"标签{len(content['tags'])}个"
+                )
+            else:
+                content = prepare_content(task, settings, material, w["name"])
 
             done_w = (
                 state.setdefault("downloaded_by_win", {})
@@ -453,11 +513,13 @@ def run_task(task_id, only_window_id=None, force=False):
                 batch = vids[:count_n]
                 if not batch:
                     add_log(f"[{name}] 窗口[{w['name']}] 未抓取到视频，跳过")
+                    _close_leftover_window(bit, w, pub_w)
                     continue
             else:
                 batch = [u for u in vids if u not in done_w]
                 if not batch:
                     add_log(f"[{name}] 窗口[{w['name']}] 无新视频，跳过（本聊天已发布的不再重复，可在任务中开启「允许重复发布」）")
+                    _close_leftover_window(bit, w, pub_w)
                     continue
             mark_flagged = False
             for i, u in enumerate(batch):
@@ -502,10 +564,13 @@ def run_task(task_id, only_window_id=None, force=False):
                         add_log(f"[{name}] 窗口[{w['name']}] 任务编号[{ask_mark}] 已标记发布，该回复不会再重复发布")
                     _finish_rec(state, rec, True)
                     ok_cnt += 1
+                    pub_w += 1
                 except Exception as e:
                     _finish_rec(state, rec, False, e)
                     fail_cnt += 1
                     add_log(f"[{name}] 窗口[{w['name']}] 发布失败: {e}", "error")
+            # 窗口复用兜底: 本窗口未发布成功则关闭抓取阶段留下的窗口
+            _close_leftover_window(bit, w, pub_w)
 
     else:
         # JSON 接口模式: 单次抓取 -> 各窗口发布(标题作为AI材料)
@@ -589,7 +654,7 @@ def run_task(task_id, only_window_id=None, force=False):
     add_log(f"[{name}] 本轮结束: 成功 {ok_cnt} 个视频, 失败 {fail_cnt} 次")
 
 
-def run_ai_ask(task, bit, settings, targets):
+def run_ai_ask(task, bit, settings, targets, force=False):
     """AI提问任务: 逐窗口打开各自的对话框URL发送提示词(可按日限次, 按成功发送记录计数)"""
     import datetime as dt
 
@@ -625,8 +690,8 @@ def run_ai_ask(task, bit, settings, targets):
         if not src:
             add_log(f"[{name}] 窗口[{w['name']}] 未配置对话框URL，跳过（每个目标窗口必须有自己的链接）", "error")
             continue
-        # 防重复提问门禁: 上一个编号还没被视频发布任务消费(未发布)时不再提问
-        if wait_consume and store.has_pending_ask(w["id"], task.get("id") or ""):
+        # 防重复提问门禁: 上一个编号还没被视频发布任务消费(未发布)时不再提问; 强制执行时不拦截
+        if wait_consume and not force and store.has_pending_ask(w["id"], task.get("id") or ""):
             add_log(f"[{name}] 窗口[{w['name']}] 存在尚未被消费的提问编号，等待消费后再提问（防止重复提问堆叠）", "warning")
             continue
         if limit > 0 and limit_mode != "force":

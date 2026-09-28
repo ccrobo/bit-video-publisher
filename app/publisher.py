@@ -37,9 +37,14 @@ def _publish(bitclient, settings, window, video_path, caption, title=""):
     pw = None
     page = None
     try:
-        addr = bitclient.open_window(window["id"])
+        # 窗口复用: 抓取阶段留窗时会在 window 上附带CDP地址, 直接连接不再调开窗接口
+        addr = window.pop("_cdp_addr", None)
+        if addr:
+            add_log(f"[{window['name']}] 复用抓取阶段已打开的窗口(无需重新打开)")
+        else:
+            addr = bitclient.open_window(window["id"])
         cdp = addr if addr.startswith("http") else "http://" + addr
-        add_log(f"[{window['name']}] 窗口已打开，正在连接内核 {cdp}")
+        add_log(f"[{window['name']}] 窗口就绪，正在连接内核 {cdp}")
         pw = sync_playwright().start()
         browser = pw.chromium.connect_over_cdp(cdp)
         ctx = browser.contexts[0] if browser.contexts else browser.new_context()

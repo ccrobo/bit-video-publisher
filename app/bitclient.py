@@ -85,33 +85,53 @@ class BitClient:
 
     def list_windows(self):
         wins = []
-        page = 0
-        while True:
-            data = None
-            last_err = None
-            for pth in ("/browser/list/paged", "/browser/list"):
-                try:
-                    data = self._post(pth, {"page": page, "pageSize": 100})
+        seen = set()
+
+        def _norm(w):
+            return {
+                "id": str(w.get("id")),
+                "seq": w.get("seq"),
+                "name": w.get("name") or f"窗口{w.get('seq')}",
+                "remark": w.get("remark") or "",
+                "group_id": str(w.get("groupId") or ""),
+                "group_name": str(w.get("groupName") or ""),
+                # 分享/归属信息: is_share=收到的分享窗口, belong_user=窗口归属账号
+                "is_share": bool(w.get("isShare")),
+                "belong_user": str(w.get("belongUserName") or w.get("shareUserName") or ""),
+            }
+
+        def _fetch(extra):
+            page = 0
+            while True:
+                data = None
+                last_err = None
+                payload = dict(extra or {}, page=page, pageSize=100)
+                for pth in ("/browser/list/paged", "/browser/list"):
+                    try:
+                        data = self._post(pth, payload)
+                        break
+                    except BitBrowserError as e:
+                        last_err = e
+                if data is None:
+                    raise last_err or BitBrowserError("获取窗口列表失败")
+                lst = data.get("list") or []
+                for w in lst:
+                    wid = str(w.get("id"))
+                    if wid not in seen:
+                        seen.add(wid)
+                        wins.append(_norm(w))
+                if len(lst) < 100 or page > 50:
                     break
-                except BitBrowserError as e:
-                    last_err = e
-            if data is None:
-                raise last_err or BitBrowserError("获取窗口列表失败")
-            lst = data.get("list") or []
-            for w in lst:
-                wins.append(
-                    {
-                        "id": str(w.get("id")),
-                        "seq": w.get("seq"),
-                        "name": w.get("name") or f"窗口{w.get('seq')}",
-                        "remark": w.get("remark") or "",
-                        "group_id": str(w.get("groupId") or ""),
-                        "group_name": str(w.get("groupName") or ""),
-                    }
-                )
-            if len(lst) < 100 or page > 50:
-                break
-            page += 1
+                page += 1
+
+        # 默认列表: 自建窗口(本版本默认不返回收到的分享窗口)
+        _fetch({})
+        # 兜底: groupId=share 是比特浏览器后端约定的哨兵值, 专查「分享给我」的窗口
+        # (isShare=2, belongToMe=false), 与上面按 id 去重合并
+        try:
+            _fetch({"groupId": "share"})
+        except BitBrowserError:
+            pass
         return wins
 
     # ---------- 窗口控制 ----------

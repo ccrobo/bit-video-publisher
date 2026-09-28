@@ -125,8 +125,18 @@ def bit_sync():
         w["group_name"] = w.get("group_name") or gmap.get(w["group_id"], "默认分组")
         w["cfg"] = cfgs.get(w["id"]) or {"enabled": False, "task_ids": [], "note": ""}
         w["wvars"] = wvars.get(w["id"]) or {}
-    add_log(f"已同步比特浏览器: {len(groups)} 个分组, {len(windows)} 个窗口")
-    return {"groups": groups, "windows": windows, "win_vars": wvars}
+    # 已配置但当前比特浏览器账号下同步不到的窗口(可能属于其他账号, 或已被转移/删除/分享收回)
+    present = {w["id"] for w in windows}
+    missing = [
+        {"window_id": wid, "enabled": bool(c.get("enabled")), "task_ids": c.get("task_ids") or []}
+        for wid, c in cfgs.items() if wid not in present
+    ]
+    missing.sort(key=lambda m: (not m["enabled"], m["window_id"]))
+    add_log(
+        f"已同步比特浏览器: {len(groups)} 个分组, {len(windows)} 个窗口"
+        + (f", 另有 {len(missing)} 个已配置窗口不在当前账号下" if missing else "")
+    )
+    return {"groups": groups, "windows": windows, "win_vars": wvars, "missing_configs": missing}
 
 
 @app.get("/api/groups")

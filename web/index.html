@@ -84,7 +84,14 @@
       <el-table :data="pagedWindows" @selection-change="s=>selected=s" size="default" border stripe>
         <el-table-column type="selection" width="42"></el-table-column>
         <el-table-column prop="seq" label="序号" width="70"></el-table-column>
-        <el-table-column prop="name" label="窗口名称" min-width="160" show-overflow-tooltip></el-table-column>
+        <el-table-column prop="name" label="窗口名称" min-width="160" show-overflow-tooltip>
+          <template #default="{row}">
+            <span>{{ row.name }}</span>
+            <el-tag v-if="row.is_share" size="small" type="warning" effect="plain" style="margin-left:4px">
+              分享{{ row.belong_user ? '·' + row.belong_user : '' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="group_name" label="所属分组" width="140" show-overflow-tooltip></el-table-column>
         <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip></el-table-column>
         <el-table-column label="窗口变量" min-width="170" show-overflow-tooltip>
@@ -280,7 +287,7 @@
         <el-select v-model="runSelWinId" placeholder="全部关联窗口" clearable filterable style="width:100%">
           <el-option v-for="t in runSelTargets" :key="t.id" :label="`${t.name}（${t.value}）`" :value="t.id"></el-option>
         </el-select>
-        <el-checkbox v-model="runForce" style="margin-top:12px">强制执行（跳过「窗口已打开」跳过逻辑与「消费等待时间」，立即消费未到期编号）</el-checkbox>
+        <el-checkbox v-model="runForce" style="margin-top:12px">强制执行（跳过「窗口已打开」检查与「消费等待时间」，立即消费未到期编号）</el-checkbox>
         <template #footer>
           <el-button @click="runSelVisible=false">取消</el-button>
           <el-button type="success" @click="confirmRun">{{ runSelWinId ? '仅执行该窗口' : '执行全部窗口' }}</el-button>
@@ -909,7 +916,18 @@ const app = createApp({
         windows.value = j.windows.map(w => Object.assign({}, w, { wvars: winVars.value[w.id] || {} }));
         pageNo.value = 1;
         loadVarDefs();
-        if (!silent) ElementPlus.ElMessage.success(`同步完成：${j.groups.length} 个分组 / ${j.windows.length} 个窗口`);
+        const miss = j.missing_configs || [];
+        if (!silent) {
+          if (miss.length) {
+            const en = miss.filter(m => m.enabled).length;
+            ElementPlus.ElMessage.warning({
+              message: `同步完成：${j.groups.length} 个分组 / ${j.windows.length} 个窗口；另有 ${miss.length} 个已配置窗口不在当前比特浏览器账号下（可能属于其他账号，或已被转移/删除/收回分享）${en ? `，其中 ${en} 个原为启用状态` : ''}`,
+              duration: 8000,
+            });
+          } else {
+            ElementPlus.ElMessage.success(`同步完成：${j.groups.length} 个分组 / ${j.windows.length} 个窗口`);
+          }
+        }
       } catch(e) {
         if (!silent) ElementPlus.ElMessage.error(String(e.message||e));
       }
