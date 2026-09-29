@@ -95,6 +95,8 @@ def _publish(bitclient, settings, window, video_path, caption, title=""):
         # 确认真正发布成功后才算完成
         if _wait_publish_success(page, max(90, timeout)):
             add_log(f"[{window['name']}] 视频发布成功: {Path(video_path).name}")
+            # 确认成功后延迟5s再进入关闭流程, 给抖音留出提交收尾时间
+            time.sleep(5)
         else:
             shot = shot_dir / f"fail-{ts}-{window['id']}.png"
             try:
