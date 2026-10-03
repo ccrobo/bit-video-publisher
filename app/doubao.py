@@ -70,6 +70,19 @@ _LATEST_REPLY_TEXT_JS = """
   const collectLeaves = list => {
     return list.filter(x => !list.some(y => y !== x && x.el.contains(y.el)));
   };
+  // 文本清洗: 豆包页面 AI 文案与用户提问常共处同一容器, 从首个【字段标记】切开,
+  // 截掉"生成视频："/"系统附加要求"之后的用户提问尾巴
+  const cleanAiText = raw => {
+    let s = (raw || '').trim();
+    const head = s.indexOf('【');
+    if (head > 0) s = s.slice(head);
+    const tail = Math.min(
+      s.indexOf('生成视频：') > 0 ? s.indexOf('生成视频：') : s.length,
+      s.indexOf('——系统附加要求') > 0 ? s.indexOf('——系统附加要求') : s.length,
+      s.indexOf('系统附加要求') > 0 ? s.indexOf('系统附加要求') : s.length
+    );
+    return s.slice(0, tail).trim();
+  };
 
   // --- A1: 【生成时间】强标记 (只有AI会写) ---
   const a1 = [];
@@ -82,7 +95,7 @@ _LATEST_REPLY_TEXT_JS = """
   const a1Leaves = collectLeaves(a1);
   if (a1Leaves.length) {
     const last = a1Leaves[a1Leaves.length - 1];
-    if ((last.t || '').length > 10) return { how: 'mark-ts(' + a1Leaves.length + ')', text: last.t };
+    if ((last.t || '').length > 10) return { how: 'mark-ts(' + a1Leaves.length + ')', text: cleanAiText(last.t) };
   }
 
   // --- A2: AI角色气泡 + 至少有 标题/描述/解答/旁白 任一项 ---
@@ -97,7 +110,7 @@ _LATEST_REPLY_TEXT_JS = """
   const a2Leaves = collectLeaves(a2);
   if (a2Leaves.length) {
     const last = a2Leaves[a2Leaves.length - 1];
-    if ((last.t || '').length > 30) return { how: 'mark-ai(' + a2Leaves.length + ')', text: last.t };
+    if ((last.t || '').length > 30) return { how: 'mark-ai(' + a2Leaves.length + ')', text: cleanAiText(last.t) };
   }
 
   // --- A3: 旧策略(兜底) —— 但先排除用户气泡 ---
@@ -111,7 +124,7 @@ _LATEST_REPLY_TEXT_JS = """
   const leaves = collectLeaves(cand);
   if (leaves.length) {
     const last = leaves[leaves.length - 1];
-    if ((last.t || '').length > 30) return { how: 'mark-block(' + leaves.length + ')', text: last.t };
+    if ((last.t || '').length > 30) return { how: 'mark-block(' + leaves.length + ')', text: cleanAiText(last.t) };
   }
 
   // 视频卡片锚点 (保持原逻辑不变)
@@ -134,13 +147,13 @@ _LATEST_REPLY_TEXT_JS = """
       let top = card;
       while (top.parentElement && top.parentElement !== sc) top = top.parentElement;
       const t = ((top.innerText) || '').trim();
-      if (t && t.length > 30 && maxBodyLen(t)) return { how: 'scroller-anchor', text: t.slice(0, 6000) };
+      if (t && t.length > 30 && maxBodyLen(t)) return { how: 'scroller-anchor', text: cleanAiText(t.slice(0, 6000)) };
     }
     // 策略C: 特征类名兜底 + 不是用户气泡
     const msg = card.closest('[class*="message"],[class*="receive"],[class*="agent"],[class*="container-"],[class*="reply"]');
     if (msg && !hasUserMark(msg)) {
       const t = ((msg.innerText) || '').trim();
-      if (t && t.length > 30) return { how: 'closest', text: t.slice(0, 6000) };
+      if (t && t.length > 30) return { how: 'closest', text: cleanAiText(t.slice(0, 6000)) };
     }
   }
   return { how: 'none', text: '' };
@@ -320,82 +333,37 @@ _MARK_SCOPE_JS = """
 _MARK_SCAN_JS = """
 () => {
   const RE = /ASK-\\d{8}-[A-Z0-9]{4,8}/g;
-""" + _MARK_SCOPE_JS + """
-  const hits = [];
-  for (const el of document.querySelectorAll('div')) {
-    const t = el.innerText || '';
-    if (!t || t.length > 30000) continue;
-    if (inFixed(el)) continue;
-    RE.lastIndex = 0;
-    const ms = t.match(RE);
-    if (ms && ms.length) hits.push({el, ms});
-  }
-  // 只留最小块: 不再包含其他命中块的
-  const leaves = hits.filter(h => !hits.some(o => o !== h && h.el.contains(o.el)));
-  // 防御: 同时含多个不同编号的leaf是"消息列表大容器"塌缩产物, 内部消息级候选全被吞掉
-  // -> 把leaf内每个编号的最小命中块补回候选; 塌缩leaf本身丢弃(全文混合多轮回复, 不能作文案)。
-  // 注意不能全局按"每编号最小块"砍候选: 输入框草稿模板块比AI回复气泡更小, 会挤掉真回复
-  const multi = leaves.filter(h => new Set(h.ms).size > 1);
-  let scanList = leaves.filter(h => !multi.includes(h));
-  if (multi.length) {
-    const byMark = new Map();
-    for (const h of hits) {
-      if (!multi.some(m => m.el.contains(h.el) && m.el !== h.el)) continue;
-      for (const mk of h.ms) {
-        const cur = byMark.get(mk);
-        if (!cur || cur.el.contains(h.el)) byMark.set(mk, h);
-      }
-    }
-    for (const h of byMark.values()) if (!scanList.includes(h)) scanList.push(h);
-  }
   const out = [];
-  for (const h of scanList) {
-    const videos = [];
-    const push = u => { if (u && /^https?:\\/\\//.test(u) && !videos.includes(u)) videos.push(u); };
-    const grab = root => {
-      if (!root) return;
-      root.querySelectorAll('video').forEach(v => {
-        push(v.currentSrc || v.src || '');
-        v.querySelectorAll('source').forEach(s => push(s.src));
-      });
-      root.querySelectorAll('a[href]').forEach(a => { if (/\\.mp4($|\\?)/.test(a.href)) push(a.href); });
-    };
-    grab(h.el);
-    if (!videos.length) {
-      // 向上爬到"消息级"容器: 逐层上升直到某层的下一个兄弟包含视频
-      // (豆包里脚本气泡与视频气泡是列表内相邻兄弟, 需要到共同父层才能互为兄弟)
-      let node = h.el;
-      for (let up = 0; up < 8 && !videos.length && node.parentElement; up++) {
-        let sib = node.nextElementSibling;
-        let hops = 0;
-        while (sib && hops < 3 && !videos.length) {
-          grab(sib);
-          sib = sib.nextElementSibling;
-          hops++;
-        }
-        if (!videos.length) node = node.parentElement;
-      }
-    }
-    out.push({
-      mark: h.ms[h.ms.length - 1],
-      text: (() => {
-        // 文本扩展: 最小编号块只有编号行, 向上爬到"消息级"取完整回复文案。
-        // 爬升边界: 文本>8000字符 或 引入了第二个不同编号(混入其他回复) 即停
-        let el = h.el, best = h.el.innerText || '';
-        for (let up = 0; up < 12; up++) {
-          const p = el.parentElement;
-          if (!p || p === document.body) break;
-          const t = p.innerText || '';
-          if (!t || t.length > 8000) break;
-          RE.lastIndex = 0;
-          const uniq = [...new Set(t.match(RE) || [])];
-          if (uniq.length > 1) break;
-          if (t.length >= best.length) { if (t.length > best.length) best = t; el = p; } else break;
-        }
-        return best.trim();
-      })(),
-      videos,
+  const push = (list, u) => { if (u && /^https?:\\/\\//.test(u) && !list.includes(u)) list.push(u); };
+  const grabVideos = root => {
+    const vids = [];
+    if (!root) return vids;
+    root.querySelectorAll('video').forEach(v => {
+      push(vids, v.currentSrc || v.src || '');
+      v.querySelectorAll('source').forEach(s => push(vids, s.src));
     });
+    root.querySelectorAll('a[href]').forEach(a => { if (/\\.mp4($|\\?)/.test(a.href)) push(vids, a.href); });
+    return vids;
+  };
+  // 精准定位AI回复: data-reply-message="true" 是豆包AI回复块的稳定标识,
+  // 用户提问块不含此属性, 因此不会误抓到用户提示词模板。
+  const replies = document.querySelectorAll('[data-reply-message="true"]');
+  for (const rep of replies) {
+    // 取整条消息容器(v_list_row)的文本, 包含AI回复正文 + 可能的视频卡
+    let row = rep;
+    while (row && row.parentElement && !row.classList.contains('v_list_row')) row = row.parentElement;
+    const textEl = row || rep;
+    const raw = (textEl.innerText || '').trim();
+    if (!raw) continue;
+    RE.lastIndex = 0;
+    const ms = raw.match(RE);
+    if (!ms || !ms.length) continue;
+    // 取该回复中最后一个编号(AI可能多轮回显, 最后一个即本轮)
+    const mark = ms[ms.length - 1];
+    // 视频优先从回复块内取; 若无则向上到整条消息容器取
+    let videos = grabVideos(rep);
+    if (!videos.length && row && row !== rep) videos = grabVideos(row);
+    out.push({ mark, text: raw, videos });
   }
   return out;
 }
@@ -975,6 +943,7 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15,
         attempt = 0
         clicked_latest = False
         downloaded = False
+        latest_src = ""
         while time.time() < deadline:
             attempt += 1
             # 优先策略: 最新回复视频容器(.auto-hide-last-sibling-br 的下一个兄弟)

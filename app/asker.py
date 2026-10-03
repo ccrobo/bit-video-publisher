@@ -209,12 +209,13 @@ def read_chat_text(bitclient, chat_url, window, settle_seconds=6):
 
 
 def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30,
-                ask_vars=None, video_mode=False):
+                ask_vars=None, video_mode=False, close_after=True):
     """打开窗口的对话框URL并发送提示词; 返回 True 表示已发出
 
     - ask_vars: 开关列表, 支持 current_time / current_date / window_id / window_name
       将把提示词里的 {当前时间}/{当前日期}/{窗口ID}/{窗口名} 替换为实际值后再发送
     - video_mode: 豆包专用, 进入页面后先尝试点击 "视频生成" Tab/模式切换, 再注入提示词
+    - close_after: 提问完成后是否关闭窗口(默认关闭)
     """
     addr = bitclient.open_window(window["id"])
     cdp = addr if addr.startswith("http") else "http://" + addr
@@ -359,8 +360,11 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30,
                 pw.stop()
             except Exception:
                 pass
-        try:
-            bitclient.close_window(window["id"])
-            add_log(f"[{window['name']}] 提问完成，窗口已关闭")
-        except Exception:
-            pass
+        if close_after:
+            try:
+                bitclient.close_window(window["id"])
+                add_log(f"[{window['name']}] 提问完成，窗口已关闭")
+            except Exception:
+                pass
+        else:
+            add_log(f"[{window['name']}] 提问完成，窗口保持打开")

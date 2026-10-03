@@ -17,7 +17,6 @@ from .task_runner import get_scraper, run_async
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _migrate_legacy_targets()
     _ensure_var_defs()
     add_log("服务已启动，访问 http://127.0.0.1:8799/ 打开控制台")
     scheduler_mod.start()
@@ -35,32 +34,6 @@ def _ensure_var_defs():
             add_log("已预置变量定义: 对话框URL")
     except Exception as e:
         add_log(f"预置变量定义失败(忽略): {e}")
-
-
-def _migrate_legacy_targets():
-    """旧任务只配了分组没勾窗口:把已填聊天页链接的窗口+组内成员一次性固化到显式目标。"""
-    try:
-        tasks = store.list_tasks()
-        wins = store._read("windows", [])
-        changed = False
-        for t in tasks:
-            if t.get("target_window_ids"):
-                continue
-            linked = [
-                wid for wid, v in (t.get("window_vars") or {}).items()
-                if isinstance(v, dict) and (v.get("source_url") or "").strip()
-            ]
-            gids = set(t.get("target_group_ids") or [])
-            members = [w["id"] for w in wins if w.get("group_id") in gids]
-            ids = list(dict.fromkeys(linked + members))
-            if ids:
-                t["target_window_ids"] = ids
-                changed = True
-                add_log(f"任务[{t.get('name')}] 已迁移 {len(ids)} 个显式目标窗口")
-        if changed:
-            store.save_tasks(tasks)
-    except Exception as e:
-        add_log(f"目标迁移失败(忽略): {e}")
 
 
 app = FastAPI(title="Bit Video Publisher", lifespan=lifespan)
@@ -121,14 +94,17 @@ def bit_sync():
     gmap = {g["id"]: g["name"] for g in groups}
     cfgs = store.load_window_configs()
     wvars = store.load_win_vars()
+    bindings = store.load_bindings()
     for w in windows:
-        w["group_name"] = w.get("group_name") or gmap.get(w["group_id"], "默认分组")
-        w["cfg"] = cfgs.get(w["id"]) or {"enabled": False, "task_ids": [], "note": ""}
+        w["group_name"] = w.get("group_name") or gmap.get(w.get("group_id"), "默认分组")
+        c = cfgs.get(w["id"]) or {"enabled": False, "note": ""}
+        c["task_ids"] = bindings.get(w["id"]) or []
+        w["cfg"] = c
         w["wvars"] = wvars.get(w["id"]) or {}
     # 已配置但当前比特浏览器账号下同步不到的窗口(可能属于其他账号, 或已被转移/删除/分享收回)
     present = {w["id"] for w in windows}
     missing = [
-        {"window_id": wid, "enabled": bool(c.get("enabled")), "task_ids": c.get("task_ids") or []}
+        {"window_id": wid, "enabled": bool(c.get("enabled")), "task_ids": bindings.get(wid) or []}
         for wid, c in cfgs.items() if wid not in present
     ]
     missing.sort(key=lambda m: (not m["enabled"], m["window_id"]))
@@ -189,7 +165,7 @@ TASK_EDITABLE = set(store.TASK_DEFAULTS.keys())
 
 
 def _clean_task(patch: dict) -> dict:
-    data = {k: v for k, v in (patch or {}).items() if k in TASK_EDITABLE}
+    data = {k: v for k, v in (patch or {}).items() if k in TASK_EDITABLE or k == "target_window_ids"}
     if "fetch_count" in data:
         data["fetch_count"] = max(1, int(data["fetch_count"] or 1))
     if "daily_limit_per_window" in data:
@@ -214,7 +190,11 @@ def _clean_task(patch: dict) -> dict:
 
 @app.get("/api/tasks")
 def get_tasks():
-    return {"tasks": store.list_tasks()}
+    tasks = store.list_tasks()
+    # 附带每个任务关联的窗口id列表(从 mapping 表查询)
+    for t in tasks:
+        t["target_window_ids"] = store.get_windows_for_task(t["id"])
+    return {"tasks": tasks}
 
 
 @app.post("/api/tasks")
@@ -238,9 +218,13 @@ def post_task(patch: dict = Body(...)):
 @app.put("/api/tasks/{tid}")
 def put_task(tid: str, patch: dict = Body(...)):
     data = _clean_task(patch)
+    wids = data.pop("target_window_ids", None)
     task = store.update_task(tid, data)
     if not task:
         raise HTTPException(404, "任务不存在")
+    # 任务侧修改关联窗口时, 更新 mapping 表
+    if wids is not None:
+        store.bind_task_to_windows(tid, [str(w) for w in wids])
     scheduler_mod.reload_jobs()
     add_log(f"任务[{task['name']}] 已更新")
     return task
@@ -500,12 +484,17 @@ def put_window_config(body: dict = Body(...)):
     patch = {}
     if "enabled" in body:
         patch["enabled"] = bool(body["enabled"])
-    if "task_ids" in body:
-        patch["task_ids"] = [str(x) for x in (body["task_ids"] or [])]
     if "note" in body:
         patch["note"] = str(body["note"] or "")
     c = store.upsert_window_config(wid, patch)
-    add_log(f"窗口 {wid} 配置已保存: {'启用' if c['enabled'] else '停用'}, 绑定 {len(c['task_ids'])} 个任务")
+    # task_ids 走 mapping 表
+    tids = []
+    if "task_ids" in body:
+        tids = [str(x) for x in (body["task_ids"] or [])]
+        store.set_window_tasks(wid, tids)
+    else:
+        tids = store.get_tasks_for_window(wid)
+    add_log(f"窗口 {wid} 配置已保存: {'启用' if c['enabled'] else '停用'}, 绑定 {len(tids)} 个任务")
     return c
 
 
@@ -517,8 +506,9 @@ def batch_configure(body: dict = Body(...)):
     enabled = body.get("enabled")
     task_mode = body.get("task_mode")
     task_ids = [str(x) for x in (body.get("task_ids") or [])] or None
-    if task_mode in ("append", "overwrite") and not task_ids:
+    if task_mode == "append" and not task_ids:
         raise HTTPException(400, "请选择要绑定的任务")
+    # overwrite 模式允许 task_ids 为空(=清空所选窗口的所有任务关联)
     cfgs = store.bulk_configure(
         window_ids,
         None if enabled is None else bool(enabled),

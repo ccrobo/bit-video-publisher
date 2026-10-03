@@ -77,7 +77,7 @@
         </el-select>
         <el-input v-model="keyword" placeholder="搜索名称/备注/序号" clearable style="width:220px"></el-input>
         <el-button type="primary" @click="syncAll" :loading="syncing">同步窗口</el-button>
-        <el-button :disabled="!selected.length" @click="batchVisible=true">批量设置 ({{selected.length}})</el-button>
+        <el-button :disabled="!selected.length" @click="openBatch">批量设置 ({{selected.length}})</el-button>
         <el-button @click="openVarDefs">变量设置</el-button>
         <span class="muted">共 {{ filteredWindows.length }} 个窗口，当前组 {{ currentGroupName }}</span>
       </div>
@@ -212,9 +212,12 @@
             </el-radio-group>
           </el-form-item>
           <el-form-item v-if="batchForm.task_mode" label="选择任务">
-            <el-select v-model="batchForm.task_ids" multiple style="width:100%" placeholder="可多选">
+            <el-select v-model="batchForm.task_ids" multiple clearable style="width:100%"
+                       :placeholder="batchForm.task_mode==='overwrite' ? '可多选，留空则清空所有任务关联' : '可多选'">
               <el-option v-for="t in tasks" :key="t.id" :label="t.name" :value="t.id"></el-option>
             </el-select>
+            <div class="muted" v-if="batchForm.task_mode==='overwrite'">覆盖模式：先清除所选窗口与所有任务的旧关联，再与所选任务双向绑定；留空=清空全部关联</div>
+            <div class="muted" v-else>追加模式：在现有关联基础上追加所选任务</div>
           </el-form-item>
         </el-form>
         <template #footer>
@@ -241,12 +244,12 @@
         <el-table-column label="平台" width="80">
           <template #default="{row}">{{ platformLabel(row.platform) }}</template>
         </el-table-column>
-        <el-table-column label="内容源" width="120">
+        <el-table-column label="内容源" width="130">
           <template #default="{row}">
             <el-tag size="small" v-if="row.source_type==='doubao_page'">豆包聊天页</el-tag>
             <el-tag size="small" type="success" v-else-if="row.source_type==='xiaoyunque_page'">小云雀聊天页</el-tag>
             <el-tag size="small" type="info" v-else>JSON接口</el-tag>
-            <el-tag size="small" type="danger" v-if="row.consume_ask">消费</el-tag>
+            <el-tag size="small" type="danger" v-if="row.consume_ask" style="margin-left:4px">消费</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="AI模型" min-width="130">
@@ -255,11 +258,8 @@
         <el-table-column prop="cron" label="周期(cron)" width="110"></el-table-column>
         <el-table-column label="目标" min-width="140">
           <template #default="{row}">
-            <el-tag size="small" type="warning" v-if="row.url_var">
-              {{ row.url_var }}·{{ varCount(row.url_var) }}窗
-            </el-tag>
-            <el-tag size="small" type="success" v-else-if="(row.target_window_ids||[]).length">窗口x{{row.target_window_ids.length}}</el-tag>
-            <span v-else class="muted">未选择</span>
+            <el-tag size="small" type="success" v-if="(row.target_window_ids||[]).length">窗口x{{row.target_window_ids.length}}</el-tag>
+            <span v-else class="muted">未绑定窗口</span>
           </template>
         </el-table-column>
         <el-table-column label="启用" width="70">
@@ -281,7 +281,7 @@
 
       <el-dialog v-model="runSelVisible" title="立即执行" width="500">
         <div style="margin-bottom:12px;color:#909399;font-size:13px;line-height:1.6">
-          任务【{{ runSelRow && runSelRow.name }}】关联 {{ runSelTargets.length }} 个窗口（按变量「{{ runSelRow && runSelRow.url_var }}」匹配）。<br/>
+          任务【{{ runSelRow && runSelRow.name }}】关联 {{ runSelTargets.length }} 个窗口（按变量「{{ runSelRow && runSelRow.url_var }}」匹配，仅含任务关联窗口）。<br/>
           可不选，直接执行全部；也可只指定其中一个窗口执行。
         </div>
         <el-select v-model="runSelWinId" placeholder="全部关联窗口" clearable filterable style="width:100%">
@@ -369,7 +369,7 @@
             <template v-else>
             <el-row :gutter="12">
               <el-col :span="12"><el-form-item label="内容源类型">
-                <el-select v-model="taskForm.source_type" style="width:100%" @change="v=>{ if(v==='json') taskForm.consume_ask=false; }">
+                <el-select v-model="taskForm.source_type" style="width:100%">
                   <el-option label="豆包聊天页(浏览器抓取)" value="doubao_page"></el-option>
                   <el-option label="小云雀聊天页(浏览器抓取)" value="xiaoyunque_page"></el-option>
                   <el-option label="JSON 接口" value="json"></el-option>
@@ -383,17 +383,7 @@
                   <el-radio :value="false">常规：抓取每个窗口最新回复发布</el-radio>
                   <el-radio :value="true">消费AI提问：按任务编号找到对应回复，发布其中的视频</el-radio>
                 </el-radio-group>
-                <template v-if="taskForm.consume_ask">
-                  <el-select v-model="taskForm.consume_ask_task_id" clearable filterable
-                             placeholder="选择要消费的AI提问任务（可不选=消费全部提问任务的编号）"
-                             style="width:100%; margin-top:6px">
-                    <el-option v-for="t in tasks.filter(x=>x.task_type==='ai_ask')" :key="t.id"
-                               :label="`${t.name}（${platformLabel(t.ask_platform)}·变量 ${t.url_var || '-'}）`" :value="t.id"></el-option>
-                  </el-select>
-                  <div class="muted">定时轮询消费：配合下方「执行周期」自动运行。执行时打开各窗口聊天页，按【任务编号】定位
-                    对应提问的回复并发布其中视频；仅消费「提问成功至少10分钟」的条目（等AI生成完毕），按先后顺序逐个消费；
-                    发布成功自动标记已发布、不会重复；尚未生成完视频的编号留到下一轮。窗口需开启抓取发布且已登录对应平台。</div>
-                </template>
+                <div v-if="taskForm.consume_ask" class="muted">定时轮询消费：配合下方「执行周期」自动运行。执行时打开各窗口聊天页，自动查找所有待消费的AI提问编号（提问成功≥10分钟且未发布），按【任务编号】定位对应回复并发布其中视频；发布成功自动标记已发布、不会重复；尚未生成完视频的编号留到下一轮。窗口需开启抓取发布且已登录对应平台。</div>
               </el-form-item></el-col>
             </el-row>
             <template v-if="!isBrowserSource">
@@ -476,6 +466,17 @@
                 <div class="muted" v-else>按该变量圈定要发布的目标窗口（变量值不参与流程）；新窗口配好变量即自动纳入</div>
               </el-form-item>
             </template>
+            <el-form-item label="关联窗口">
+              <div style="display:flex;gap:8px;align-items:flex-start">
+                <el-select v-model="taskForm.target_window_ids" multiple filterable collapse-tags collapse-tags-tooltip
+                           style="flex:1" placeholder="留空则自动关联所有配置了该变量的窗口">
+                  <el-option v-for="w in varTargets" :key="w.id" :label="w.name" :value="w.id"></el-option>
+                </el-select>
+                <el-button @click="taskForm.target_window_ids = varTargets.map(w=>w.id)">全选</el-button>
+                <el-button @click="taskForm.target_window_ids = []">清空</el-button>
+              </div>
+              <div class="muted">可选：留空则自动关联所有配置了该变量的窗口；勾选后仅执行指定窗口</div>
+            </el-form-item>
             <el-row :gutter="12">
               <el-col :span="12"><el-form-item label="执行周期 cron">
                 <el-select v-model="taskForm.cron" filterable allow-create default-first-option style="width:100%" @change="cronDescCheck">
@@ -518,6 +519,12 @@
                 </el-select>
                 <div class="muted">默认按系统成功提问记录判断今日是否可继续，不打开窗口查询；选直接提问则跳过检查立即开窗</div>
               </el-form-item></el-col>
+              <el-col :span="8"><el-form-item label="提问后关窗">
+                <el-select v-model="taskForm.close_after_publish" style="width:100%">
+                  <el-option label="跟随全局设置" :value="null"></el-option>
+                  <el-option label="是" :value="true"></el-option>
+                  <el-option label="否" :value="false"></el-option>
+                </el-select></el-form-item></el-col>
             </el-row>
           </el-form>
         </div>
@@ -935,9 +942,17 @@ const app = createApp({
     }
 
     // ------- windows -------
+    const SHARE_GROUP_ID = '__share__';
     const filteredWindows = computed(() => {
       return windows.value.filter(w => {
-        if (groupFilter.value && w.group_id !== groupFilter.value) return false;
+        if (groupFilter.value) {
+          // 虚拟分组「分享窗口」: 按 is_share 过滤收到的分享窗口
+          if (groupFilter.value === SHARE_GROUP_ID) {
+            if (!w.is_share) return false;
+          } else if (w.group_id !== groupFilter.value) {
+            return false;
+          }
+        }
         if (keyword.value) {
           const k = keyword.value.toLowerCase();
           const s = `${w.seq} ${w.name} ${w.remark}`.toLowerCase();
@@ -1000,6 +1015,13 @@ const app = createApp({
 
     const batchVisible = ref(false);
     const batchForm = reactive({ enabled:null, task_mode:'', task_ids:[] });
+    async function openBatch() {
+      if (!tasks.value.length) await loadTasks();
+      batchForm.enabled = null;
+      batchForm.task_mode = '';
+      batchForm.task_ids = [];
+      batchVisible.value = true;
+    }
     async function applyBatch() {
       try {
         await api('/api/batch/configure', { method:'POST', body:JSON.stringify({
@@ -1259,7 +1281,15 @@ const app = createApp({
       if (!taskForm.url_var) return [];
       return (windows.value || []).filter(w => ((winVars.value[w.id] || {})[taskForm.url_var] || '').trim());
     });
-    function newTask(){ Object.assign(taskForm, blankTask()); step.value = 0; taskVisible.value = true; loadModels(); loadPrompts(); loadWinVars(); }
+    async function newTask(){
+      Object.assign(taskForm, blankTask());
+      step.value = 0;
+      taskVisible.value = true;
+      loadModels();
+      loadPrompts();
+      await loadWinVars();
+      // 新建任务关联窗口留空: 自动关联所有配置了该变量的窗口, 无需手动勾选
+    }
     function editTask(row){
       Object.assign(taskForm, blankTask(), JSON.parse(JSON.stringify(row)));
       if (!taskForm.window_vars) taskForm.window_vars = {};
@@ -1272,6 +1302,8 @@ const app = createApp({
       editTask(row);
       taskForm.id = '';
       taskForm.name = row.name + ' - 副本';
+      // 复制任务不继承原任务的窗口绑定, 留空则自动关联所有配置了该变量的窗口
+      taskForm.target_window_ids = [];
     }
     function validateStep(s){
       if(!taskForm.name){ ElementPlus.ElMessage.warning('请填写任务名称'); return false; }
@@ -1340,9 +1372,11 @@ const app = createApp({
     function taskTargetsOf(row){
       const k = (row.url_var || '').trim();
       if (!k) return [];
-      return (windows.value || [])
-        .filter(w => ((winVars.value[w.id] || {})[k] || '').trim())
-        .map(w => ({ id: w.id, name: w.name || w.id, value: (winVars.value[w.id] || {})[k] }));
+      const bound = row.target_window_ids || [];
+      if (!bound.length) return []; // 未关联任何窗口
+      const all = (windows.value || [])
+        .filter(w => ((winVars.value[w.id] || {})[k] || '').trim() && bound.includes(w.id));
+      return all.map(w => ({ id: w.id, name: w.name || w.id, value: (winVars.value[w.id] || {})[k] }));
     }
     async function runTask(row) {
       runSelRow.value = row;
@@ -1427,7 +1461,7 @@ const app = createApp({
       cronDesc, cronDescCheck,
       refreshStatus, startBit, syncAll, filteredWindows, pagedWindows, currentGroupName,
       openWin, closeWin, cfgVisible, cfgRow, cfgForm, editCfg, saveCfg, toggleCfg,
-      batchVisible, batchForm, applyBatch, tmap, taskName,
+      batchVisible, batchForm, openBatch, applyBatch, tmap, taskName,
       taskVisible, taskForm, newTask, editTask, copyTask, saveTask, delTask, toggleTask, runTask,
       winVarKeys, varTargets, varCount, loadWinVars,
       runSelVisible, runSelRow, runSelWinId, runForce, runSelTargets, confirmRun,

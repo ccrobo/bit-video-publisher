@@ -125,14 +125,12 @@ TASK_DEFAULTS = {
     "ai_prompt": "",
     "allow_repeat": True,
     "target_group_ids": [],
-    "target_window_ids": [],
     "window_vars": {},
     "url_var": "",  # ai_ask: 引用的窗口变量名(如"对话框URL"), 设置后按变量自动圈定目标窗口并取各窗口URL
     "daily_limit_per_window": 1,
     "close_after_publish": None,
-    # 消费AI提问模式(video_publish): 按任务编号定位提问对应的回复并发布其中视频
-    "consume_ask": False,  # True=启用消费模式(仅豆包/小云雀聊天页源)
-    "consume_ask_task_id": "",  # 绑定的AI提问任务id, 空=消费全部提问任务的编号
+    "consume_ask": False,  # video_publish: 消费AI提问模式(按任务编号定位回复并发布)
+    "consume_ask_task_id": "",  # video_publish: 绑定的AI提问任务ID(空=不限)
 }
 
 
@@ -176,6 +174,15 @@ def update_task(tid, patch):
 def delete_task(tid):
     tasks = [t for t in list_tasks() if t.get("id") != tid]
     save_tasks(tasks)
+    # 从 mapping 表中移除该任务的所有关联
+    bindings = load_bindings()
+    changed = False
+    for wid in list(bindings.keys()):
+        if tid in bindings[wid]:
+            bindings[wid] = [t for t in bindings[wid] if t != tid]
+            changed = True
+    if changed:
+        save_bindings(bindings)
     return True
 
 
@@ -526,9 +533,91 @@ def delete_ask(mark):
     return True
 
 
+# ---------------- 窗口-任务关联 mapping 表 ----------------
+# 单一数据源: {window_id: [task_id, ...]}
+# 覆盖模式 = 先删后插(所选窗口的旧关联全部清除, 再写入新关联)
+# 追加模式 = 在旧关联基础上追加
+
+def load_bindings():
+    return _read("window_task_bindings.json", {})
+
+
+def save_bindings(bindings):
+    _write("window_task_bindings.json", bindings)
+
+
+def get_tasks_for_window(window_id):
+    """窗口绑定的任务id列表"""
+    return list((load_bindings().get(window_id) or []))
+
+
+def get_windows_for_task(task_id):
+    """任务关联的窗口id列表"""
+    return [wid for wid, tids in load_bindings().items() if task_id in tids]
+
+
+def bind_windows_to_tasks(window_ids, task_ids, mode="overwrite"):
+    """批量绑定窗口与任务。
+    mode=overwrite: 所选窗口的旧关联全部清除, 再写入新关联(task_ids 可为空=清空)
+    mode=append: 在旧关联基础上追加
+    """
+    bindings = load_bindings()
+    new_tids = list(dict.fromkeys(task_ids or []))
+    for wid in window_ids:
+        if mode == "overwrite":
+            bindings[wid] = list(new_tids)
+        elif mode == "append":
+            old = bindings.get(wid) or []
+            bindings[wid] = list(dict.fromkeys(old + new_tids))
+        # 清理空列表
+        if not bindings.get(wid):
+            bindings.pop(wid, None)
+    save_bindings(bindings)
+    return bindings
+
+
+def bind_task_to_windows(task_id, window_ids):
+    """任务侧设置关联窗口(覆盖): 先从所有窗口移除该任务, 再加入指定窗口"""
+    bindings = load_bindings()
+    new_wids = set(window_ids or [])
+    for wid in list(bindings.keys()):
+        tids = bindings[wid]
+        if task_id in tids:
+            if wid in new_wids:
+                # 保留
+                pass
+            else:
+                bindings[wid] = [t for t in tids if t != task_id]
+                if not bindings[wid]:
+                    del bindings[wid]
+        else:
+            if wid in new_wids:
+                bindings[wid] = tids + [task_id]
+    # 新窗口可能不在 bindings 里
+    for wid in new_wids:
+        if wid not in bindings:
+            bindings[wid] = [task_id]
+    save_bindings(bindings)
+    return bindings
+
+
+def set_window_tasks(window_id, task_ids):
+    """单窗口设置绑定任务(覆盖)"""
+    bindings = load_bindings()
+    tids = list(dict.fromkeys(task_ids or []))
+    if tids:
+        bindings[window_id] = tids
+    else:
+        bindings.pop(window_id, None)
+    save_bindings(bindings)
+
+
 def upsert_window_config(window_id, patch):
     cfgs = load_window_configs()
-    c = cfgs.get(window_id) or {"enabled": False, "task_ids": [], "note": ""}
+    c = cfgs.get(window_id) or {"enabled": False, "note": ""}
+    # task_ids 不再存在窗口配置里, 统一走 mapping 表
+    if patch and "task_ids" in patch:
+        patch = {k: v for k, v in patch.items() if k != "task_ids"}
     c.update(patch or {})
     cfgs[window_id] = c
     save_window_configs(cfgs)
@@ -536,17 +625,22 @@ def upsert_window_config(window_id, patch):
 
 
 def bulk_configure(window_ids, enabled=None, task_mode=None, task_ids=None):
+    """批量配置窗口。
+    - enabled: 开启/关闭抓取发布
+    - task_mode=overwrite: 所选窗口清空旧任务关联, 重新绑定 task_ids(可为空=清空)
+    - task_mode=append: 追加绑定 task_ids
+    关联关系统一维护在 window_task_bindings.json
+    """
     cfgs = load_window_configs()
     for wid in window_ids:
-        c = cfgs.get(wid) or {"enabled": False, "task_ids": [], "note": ""}
+        c = cfgs.get(wid) or {"enabled": False, "note": ""}
         if enabled is not None:
             c["enabled"] = bool(enabled)
-        if task_mode == "overwrite" and task_ids is not None:
-            c["task_ids"] = list(dict.fromkeys(task_ids))
-        elif task_mode == "append" and task_ids:
-            c["task_ids"] = list(dict.fromkeys(list(c.get("task_ids") or []) + list(task_ids)))
         cfgs[wid] = c
     save_window_configs(cfgs)
+
+    if task_mode in ("overwrite", "append"):
+        bind_windows_to_tasks(window_ids, task_ids, mode=task_mode)
     return cfgs
 
 

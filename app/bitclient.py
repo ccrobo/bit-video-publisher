@@ -81,6 +81,9 @@ class BitClient:
             if len(lst) < 100 or page > 50:
                 break
             page += 1
+        # 追加虚拟分组「分享窗口」: 专门承载 isShare=true 的收到的分享窗口
+        # 前端分组筛选选到该项时按 is_share 过滤(见 web/index.html filteredWindows)
+        out.append({"id": "__share__", "name": "分享窗口"})
         return out
 
     def list_windows(self):

@@ -333,7 +333,27 @@ _MARK_SCAN_JS = """
           if (uniq.length > 1) break;
           if (t.length >= best.length) { if (t.length > best.length) best = t; el = p; } else break;
         }
-        return best.trim();
+        // 清洗: 爬升可能把用户提问(含提示词模板)也包进来。
+        // 提示词要求AI回复首行原样输出"任务编号：ASK-XXXX", 用行首匹配定位AI回复起点,
+        // 丢弃前面的用户提问与提示词模板(模板里的"格式：任务编号："在行中, 不匹配行首)。
+        const headRe = /^\\s*(?:任务编号[:：]\\s*)?ASK-\\d{8}-[A-Z0-9]{4,8}/m;
+        const hm = best.match(headRe);
+        let s;
+        if (hm) {
+          s = best.slice(hm.index).trim();
+        } else {
+          // 兜底: AI未按要求首行输出编号时, 取最后一组结构化字段
+          // (用户提示词模板在前, AI真实回复在后, 最后一组字段才是真实产出)
+          s = best.trim();
+          const fieldMarks = ['【标题】', '【描述】', '【新闻事件】', '【热点解读】', '【完整视频脚本】', '【旁白】', '【生成时间】', '【AI 任务产出'];
+          let lastIdx = -1;
+          for (const mk of fieldMarks) {
+            const idx = s.lastIndexOf(mk);
+            if (idx > lastIdx) lastIdx = idx;
+          }
+          if (lastIdx > 0) s = s.slice(lastIdx).trim();
+        }
+        return s;
       })(),
       videos,
     });
