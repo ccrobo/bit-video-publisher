@@ -349,11 +349,11 @@ _MARK_SCAN_JS = """
   // 用户提问块不含此属性, 因此不会误抓到用户提示词模板。
   const replies = document.querySelectorAll('[data-reply-message="true"]');
   for (const rep of replies) {
-    // 取整条消息容器(v_list_row)的文本, 包含AI回复正文 + 可能的视频卡
-    let row = rep;
-    while (row && row.parentElement && !row.classList.contains('v_list_row')) row = row.parentElement;
-    const textEl = row || rep;
-    const raw = (textEl.innerText || '').trim();
+    // 文本提取: 克隆回复块, 移除用户引用块(ref-content-wrapper),
+    // 因为豆包现在每个AI回复顶部都带用户提问的引用, 引用里是用户提示词模板。
+    const clone = rep.cloneNode(true);
+    clone.querySelectorAll('[data-testid="ref-content-wrapper"]').forEach(e => e.remove());
+    const raw = (clone.innerText || '').trim();
     if (!raw) continue;
     RE.lastIndex = 0;
     const ms = raw.match(RE);
@@ -362,7 +362,11 @@ _MARK_SCAN_JS = """
     const mark = ms[ms.length - 1];
     // 视频优先从回复块内取; 若无则向上到整条消息容器取
     let videos = grabVideos(rep);
-    if (!videos.length && row && row !== rep) videos = grabVideos(row);
+    if (!videos.length) {
+      let row = rep;
+      while (row && row.parentElement && !row.classList.contains('v_list_row')) row = row.parentElement;
+      if (row && row !== rep) videos = grabVideos(row);
+    }
     out.push({ mark, text: raw, videos });
   }
   return out;

@@ -227,7 +227,7 @@ def ask_direct_content(material):
     """
     text = material or ""
     tm = re.search(r"【标题】\s*([^\n\r【]+)", text)
-    dm = re.search(r"【描述】\s*([\s\S]+?)(?=\n\s*【|$)", text)
+    dm = re.search(r"【描述】\s*([\s\S]+?)(?=【|$)", text)
     if not tm or not dm:
         return None
     title = tm.group(1).strip()
