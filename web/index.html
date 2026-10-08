@@ -490,6 +490,12 @@
                 <el-switch v-model="taskForm.enabled"></el-switch>
                 <div class="muted">开启后按 cron 定时自动执行</div></el-form-item></el-col>
             </el-row>
+            <el-row :gutter="12">
+              <el-col :span="8"><el-form-item label="并发窗口数">
+                <el-input-number v-model="taskForm.concurrency" :min="1" :max="10" style="width:100%"></el-input-number>
+                <div class="muted">同时执行的窗口数量，默认 2</div>
+              </el-form-item></el-col>
+            </el-row>
             <template v-if="taskForm.task_type!=='ai_ask'">
             <el-row :gutter="12">
               <el-col :span="8"><el-form-item label="单窗口日上限">
@@ -1058,7 +1064,8 @@ const app = createApp({
       fetch_count:1, ai_model_id:'', ai_prompt:'', allow_repeat:true,
       target_group_ids:[], target_window_ids:[], window_vars:{}, url_var:'对话框URL',
       daily_limit_per_window:1, close_after_publish:null,
-      consume_ask:false, consume_ask_task_id:''
+      consume_ask:false, consume_ask_task_id:'',
+      concurrency:2
     });
     const askPlatformList = [
       { v:'doubao', label:'豆包', ready:true },

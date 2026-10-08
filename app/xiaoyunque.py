@@ -593,7 +593,7 @@ def find_xiaoyunque_replies_by_marks(bitclient, settings, source_url, window, ma
                 f"窗口[{window['name']}] 未登录小云雀，请先在该窗口手动登录 jianying.com"
             )
         try:
-            page.wait_for_load_state("networkidle", timeout=20000)
+            page.wait_for_load_state("load", timeout=8000)
         except Exception:
             pass
 
@@ -840,7 +840,7 @@ def scrape_xiaoyunque_chat(bitclient, settings, source_url, window, wait_seconds
                 f"窗口[{window['name']}] 未登录小云雀，请先在该窗口手动登录 jianying.com"
             )
         try:
-            page.wait_for_load_state("networkidle", timeout=30000)
+            page.wait_for_load_state("load", timeout=8000)
         except Exception:
             pass
 

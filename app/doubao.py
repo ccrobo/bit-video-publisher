@@ -599,7 +599,7 @@ def find_doubao_replies_by_marks(bitclient, settings, source_url, window, marks,
         if "/login" in cur or "passport" in cur:
             raise DoubaoScrapeError(f"窗口[{window['name']}] 未登录豆包，请先在该窗口手动登录 doubao.com")
         try:
-            page.wait_for_load_state("networkidle", timeout=20000)
+            page.wait_for_load_state("load", timeout=8000)
         except Exception:
             pass
 
@@ -926,7 +926,7 @@ def scrape_doubao_chat(bitclient, settings, source_url, window, wait_seconds=15,
         if "/login" in cur or "passport" in cur:
             raise DoubaoScrapeError(f"窗口[{window['name']}] 未登录豆包，请先在该窗口手动登录 doubao.com")
         try:
-            page.wait_for_load_state("networkidle", timeout=30000)
+            page.wait_for_load_state("load", timeout=8000)
         except Exception:
             pass
 

@@ -3,6 +3,7 @@ import datetime as dt
 import re
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import platforms, sources, store
@@ -107,17 +108,25 @@ def prepare_content(task, settings, material, win_name):
     return content
 
 
-def _record(state, **kw):
+def _record(state, lock=None, **kw):
     rec = {"time": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **kw}
-    state.setdefault("history", []).append(rec)
+    if lock:
+        with lock:
+            state.setdefault("history", []).append(rec)
+    else:
+        state.setdefault("history", []).append(rec)
     return rec
 
 
-def _finish_rec(state, rec, ok, err=None):
+def _finish_rec(state, rec, ok, err=None, lock=None):
     rec["ok"] = ok
     if err:
         rec["error"] = str(err)[:300]
-    store.save_state(state)
+    if lock:
+        with lock:
+            store.save_state(state)
+    else:
+        store.save_state(state)
 
 
 def _close_leftover_window(bit, window, published, close_after=True):
@@ -133,6 +142,37 @@ def _close_leftover_window(bit, window, published, close_after=True):
         bit.close_window(window["id"])
     except Exception:
         pass
+
+
+def run_concurrent(targets, worker, concurrency=2):
+    """并发执行多个窗口的任务。
+
+    - targets: 窗口列表
+    - worker(w) -> (ok_cnt, fail_cnt): 单窗口执行函数, 返回成功/失败计数
+    - concurrency: 最大并发线程数, 最小为1
+    返回 (总成功数, 总失败数)。
+    """
+    concurrency = max(1, int(concurrency or 1))
+    if concurrency == 1 or len(targets) <= 1:
+        ok_total, fail_total = 0, 0
+        for w in targets:
+            ok, fail = worker(w)
+            ok_total += ok
+            fail_total += fail
+        return ok_total, fail_total
+    ok_total, fail_total = 0, 0
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futures = {ex.submit(worker, w): w for w in targets}
+        for fut in as_completed(futures):
+            w = futures[fut]
+            try:
+                ok, fail = fut.result()
+            except Exception as e:
+                add_log(f"窗口[{w.get('name') or w.get('id')}] 并发执行异常: {e}", "error")
+                ok, fail = 0, 1
+            ok_total += ok
+            fail_total += fail
+    return ok_total, fail_total
 
 
 def gate_targets_by_enabled(targets, configs):
@@ -331,6 +371,8 @@ def run_task(task_id, only_window_id=None, force=False):
     close_override = task.get("close_after_publish")
     close_after = bool(settings.get("close_window_after_publish", True)) if close_override is None else bool(close_override)
     state = store.load_state()
+    state_lock = threading.Lock()
+    concurrency = max(1, int(task.get("concurrency") or 2))
 
     def eff():
         s = dict(settings)
@@ -364,19 +406,22 @@ def run_task(task_id, only_window_id=None, force=False):
         add_log(
             f"[{name}] 消费提问模式: 仅消费提问成功≥{min_age // 60}分钟的未发布编号"
             + (f", 绑定提问任务[{ask_task_id}]" if ask_task_id else ", 不限提问任务")
+            + f", 并发{concurrency}个窗口"
         )
-        for w in targets:
+
+        def consume_worker(w):
+            ok_w, fail_w = 0, 0
             src = (w.get("_var_value") or ((wvars.get(w["id"]) or {}).get("source_url") or "")).strip()
             if not src:
                 add_log(f"[{name}] 窗口[{w['name']}] 未配置聊天页链接(变量)，跳过", "error")
-                continue
+                return ok_w, fail_w
             pend = store.pending_asks(min_age_seconds=min_age, window_id=w["id"], task_id=ask_task_id)
             if not pend:
                 add_log(f"[{name}] 窗口[{w['name']}] 无待消费编号（需提问成功≥{min_age // 60}分钟且未发布）")
-                continue
+                return ok_w, fail_w
             dkey = f"{w['id']}|{_today()}"
-            used = state.setdefault("daily", {}).get(dkey, 0)
-            # 每轮只消费最新的一个待发布编号(无论是否强制执行):
+            with state_lock:
+                used = state.setdefault("daily", {}).get(dkey, 0)
             pend_total = len(pend)
             pend = pend[-1:]
             if pend_total > 1:
@@ -389,12 +434,14 @@ def run_task(task_id, only_window_id=None, force=False):
                 replies = finder(bit, settings, src, w, marks, wait_s, keep_open=True)
             except Exception as e:
                 add_log(f"[{name}] 窗口[{w['name']}] 编号定位失败: {e}", "error")
-                continue
+                return ok_w, fail_w
             got = {r["mark"]: r for r in replies}
             pub_w = 0
             for a in pend:
                 mk = a["mark"]
-                if limit > 0 and used >= limit:
+                with state_lock:
+                    cur_used = state.get("daily", {}).get(dkey, 0)
+                if limit > 0 and cur_used >= limit:
                     add_log(f"[{name}] 窗口[{w['name']}] 今日已达上限({limit})，剩余编号下轮消费")
                     break
                 r = got.get(mk)
@@ -418,17 +465,19 @@ def run_task(task_id, only_window_id=None, force=False):
                     )
                 else:
                     content = prepare_content(task, settings, material, w["name"])
-                done_w = (
-                    state.setdefault("downloaded_by_win", {})
-                    .setdefault(task_id, {})
-                    .setdefault(w["id"], [])
-                )
-                if vurl in done_w and not task.get("allow_repeat", True):
+                with state_lock:
+                    done_w = (
+                        state.setdefault("downloaded_by_win", {})
+                        .setdefault(task_id, {})
+                        .setdefault(w["id"], [])
+                    )
+                    already = vurl in done_w
+                if already and not task.get("allow_repeat", True):
                     add_log(f"[{name}] 窗口[{w['name']}] 编号[{mk}] 视频已发布过，跳过")
                     store.mark_ask_published(mk, w["id"])
                     continue
                 rec = _record(
-                    state, window=w["name"], platform=task.get("platform"),
+                    state, lock=state_lock, window=w["name"], platform=task.get("platform"),
                     url=vurl, ask_mark=mk, content=dict(content),
                 )
                 try:
@@ -438,23 +487,26 @@ def run_task(task_id, only_window_id=None, force=False):
                     )
                 except Exception as e:
                     add_log(f"[{name}] 窗口[{w['name']}] 编号[{mk}] 视频下载失败: {e}", "error")
-                    _finish_rec(state, rec, False, e)
-                    fail_cnt += 1
+                    _finish_rec(state, rec, False, e, lock=state_lock)
+                    fail_w += 1
                     continue
                 try:
                     platforms.publish(task.get("platform"), bit, eff(), w, vpath, content)
-                    done_w.append(vurl)
-                    used += 1
-                    state["daily"][dkey] = used
-                    _finish_rec(state, rec, True)
+                    with state_lock:
+                        done_w.append(vurl)
+                        state["daily"][dkey] = state.get("daily", {}).get(dkey, 0) + 1
+                    _finish_rec(state, rec, True, lock=state_lock)
                     store.mark_ask_published(mk, w["id"])
-                    ok_cnt += 1
+                    ok_w += 1
                     pub_w += 1
                 except Exception as e:
-                    _finish_rec(state, rec, False, e)
-                    fail_cnt += 1
+                    _finish_rec(state, rec, False, e, lock=state_lock)
+                    fail_w += 1
                     add_log(f"[{name}] 窗口[{w['name']}] 编号[{mk}] 发布失败: {e}", "error")
             _close_leftover_window(bit, w, pub_w, close_after)
+            return ok_w, fail_w
+
+        ok_cnt, fail_cnt = run_concurrent(targets, consume_worker, concurrency)
         add_log(f"[{name}] 本轮结束: 成功 {ok_cnt} 个视频, 失败 {fail_cnt} 次")
         return
 
@@ -465,21 +517,24 @@ def run_task(task_id, only_window_id=None, force=False):
         wvars = task.get("window_vars") or {}
         wait_s = int(task.get("source_wait") or 15)
         count_n = max(1, int(task.get("fetch_count") or 1))
-        for w in targets:
+
+        def scrape_worker(w):
+            ok_w, fail_w = 0, 0
             src = (w.get("_var_value") or ((wvars.get(w["id"]) or {}).get("source_url") or "")).strip()
             if not src:
                 add_log(f"[{name}] 窗口[{w['name']}] 未配置聊天页链接(变量)，跳过", "error")
-                continue
+                return ok_w, fail_w
             dkey = f"{w['id']}|{_today()}"
-            used = state.setdefault("daily", {}).get(dkey, 0)
+            with state_lock:
+                used = state.setdefault("daily", {}).get(dkey, 0)
             if limit > 0 and used >= limit:
                 add_log(f"[{name}] 窗口[{w['name']}] 今日已达上限({limit})，跳过")
-                continue
+                return ok_w, fail_w
             try:
                 vids, caps = scrape_fn(bit, settings, src, w, wait_s, keep_open=True)
             except Exception as e:
                 add_log(f"[{name}] 窗口[{w['name']}] 抓取失败: {e}", "error")
-                continue
+                return ok_w, fail_w
             pub_w = 0
             add_log(
                 f"[{w['name']}] [DEBUG] scraper返回caps={len(caps)}条, "
@@ -487,10 +542,7 @@ def run_task(task_id, only_window_id=None, force=False):
                 f"第1条前80字: {_oneline((caps[0] if caps else ''), 80)}"
             )
 
-            # 页面关键文字 -> AI整理为结构化发布内容(每窗口一次, 复用于本批视频)
-            # 普通抓取模式: 不按任务编号判断是否已发布(编号可能取到旧的), 改用视频URL去重(done_w)
             ask_mark, material, _ = analyze_ask_mark("\n".join(caps))
-            # 回复自带【标题】/【描述】时直接采用(与提问内容严格对应); 缺字段才退回AI整理
             add_log(
                 f"[{w['name']}] 最新回复内容({len(material or '')}字, 编号[{ask_mark or '无'}]): {_oneline(material, 150)}"
             )
@@ -504,24 +556,25 @@ def run_task(task_id, only_window_id=None, force=False):
             else:
                 content = prepare_content(task, settings, material, w["name"])
 
-            done_w = (
-                state.setdefault("downloaded_by_win", {})
-                .setdefault(task_id, {})
-                .setdefault(w["id"], [])
-            )
+            with state_lock:
+                done_w = (
+                    state.setdefault("downloaded_by_win", {})
+                    .setdefault(task_id, {})
+                    .setdefault(w["id"], [])
+                )
             if task.get("allow_repeat", True):
-                # 允许重复: 不做已发布过滤, 每轮取最新视频
                 batch = vids[:count_n]
                 if not batch:
                     add_log(f"[{name}] 窗口[{w['name']}] 未抓取到视频，跳过")
                     _close_leftover_window(bit, w, pub_w, close_after)
-                    continue
+                    return ok_w, fail_w
             else:
-                batch = [u for u in vids if u not in done_w]
+                with state_lock:
+                    batch = [u for u in vids if u not in done_w]
                 if not batch:
                     add_log(f"[{name}] 窗口[{w['name']}] 无新视频，跳过（本聊天已发布的不再重复，可在任务中开启「允许重复发布」）")
                     _close_leftover_window(bit, w, pub_w, close_after)
-                    continue
+                    return ok_w, fail_w
             for i, u in enumerate(batch):
                 try:
                     vpath = sources.download_video(
@@ -530,7 +583,8 @@ def run_task(task_id, only_window_id=None, force=False):
                     )
                 except Exception as e:
                     add_log(f"[{name}] 窗口[{w['name']}] 视频下载失败，跳过: {e}", "error")
-                    done_w.append(u)
+                    with state_lock:
+                        done_w.append(u)
                     continue
                 ok, reason = sources.validate_mp4(vpath)
                 if not ok:
@@ -542,10 +596,11 @@ def run_task(task_id, only_window_id=None, force=False):
                         vpath.unlink(missing_ok=True)
                     except Exception:
                         pass
-                    done_w.append(u)
+                    with state_lock:
+                        done_w.append(u)
                     continue
                 rec = _record(
-                    state,
+                    state, lock=state_lock,
                     task_id=task_id, task_name=name,
                     window_id=w["id"], window_name=w["name"],
                     source_url=src, video=u,
@@ -555,18 +610,20 @@ def run_task(task_id, only_window_id=None, force=False):
                 )
                 try:
                     platforms.publish(task.get("platform"), bit, eff(), w, vpath, content)
-                    done_w.append(u)
-                    used += 1
-                    state["daily"][dkey] = used
-                    _finish_rec(state, rec, True)
-                    ok_cnt += 1
+                    with state_lock:
+                        done_w.append(u)
+                        state["daily"][dkey] = state.get("daily", {}).get(dkey, 0) + 1
+                    _finish_rec(state, rec, True, lock=state_lock)
+                    ok_w += 1
                     pub_w += 1
                 except Exception as e:
-                    _finish_rec(state, rec, False, e)
-                    fail_cnt += 1
+                    _finish_rec(state, rec, False, e, lock=state_lock)
+                    fail_w += 1
                     add_log(f"[{name}] 窗口[{w['name']}] 发布失败: {e}", "error")
-            # 窗口复用兜底: 本窗口未发布成功则关闭抓取阶段留下的窗口
             _close_leftover_window(bit, w, pub_w, close_after)
+            return ok_w, fail_w
+
+        ok_cnt, fail_cnt = run_concurrent(targets, scrape_worker, concurrency)
 
     else:
         # JSON 接口模式: 单次抓取 -> 各窗口发布(标题作为AI材料)
@@ -604,18 +661,22 @@ def run_task(task_id, only_window_id=None, force=False):
 
         for it in batch:
             content = prepare_content(task, settings, it.get("title") or "", name)
-            for w in targets:
+
+            def json_worker(w):
+                ok_w, fail_w = 0, 0
                 dkey = f"{w['id']}|{_today()}"
-                used = state.setdefault("daily", {}).get(dkey, 0)
+                with state_lock:
+                    used = state.setdefault("daily", {}).get(dkey, 0)
                 if limit > 0 and used >= limit:
                     add_log(f"[{name}] 窗口[{w['name']}] 今日已达上限({limit})，跳过剩余视频")
-                    break
+                    return ok_w, fail_w
                 try:
                     vpath = sources.download_video(it["video_url"], dl_root / task_id, headers)
                 except Exception as e:
                     add_log(f"[{name}] 视频下载失败，跳过: {e}", "error")
-                    done.add(it["video_url"])
-                    continue
+                    with state_lock:
+                        done.add(it["video_url"])
+                    return ok_w, fail_w
                 ok, reason = sources.validate_mp4(vpath)
                 if not ok:
                     add_log(f"[{name}] 下载内容不是有效视频({reason})，跳过发布并移除: {vpath.name}", "error")
@@ -623,10 +684,11 @@ def run_task(task_id, only_window_id=None, force=False):
                         vpath.unlink(missing_ok=True)
                     except Exception:
                         pass
-                    done.add(it["video_url"])
-                    continue
+                    with state_lock:
+                        done.add(it["video_url"])
+                    return ok_w, fail_w
                 rec = _record(
-                    state,
+                    state, lock=state_lock,
                     task_id=task_id, task_name=name,
                     window_id=w["id"], window_name=w["name"],
                     video=it["video_url"],
@@ -635,17 +697,23 @@ def run_task(task_id, only_window_id=None, force=False):
                 )
                 try:
                     platforms.publish(task.get("platform"), bit, eff(), w, vpath, content)
-                    done.add(it["video_url"])
-                    used += 1
-                    state["daily"][dkey] = used
-                    _finish_rec(state, rec, True)
-                    ok_cnt += 1
+                    with state_lock:
+                        done.add(it["video_url"])
+                        state["daily"][dkey] = state.get("daily", {}).get(dkey, 0) + 1
+                    _finish_rec(state, rec, True, lock=state_lock)
+                    ok_w += 1
                 except Exception as e:
-                    _finish_rec(state, rec, False, e)
-                    fail_cnt += 1
+                    _finish_rec(state, rec, False, e, lock=state_lock)
+                    fail_w += 1
                     add_log(f"[{name}] 窗口[{w['name']}] 发布失败: {e}", "error")
-            state["downloaded"][task_id] = sorted(done)
-            store.save_state(state)
+                return ok_w, fail_w
+
+            ok_w, fail_w = run_concurrent(targets, json_worker, concurrency)
+            ok_cnt += ok_w
+            fail_cnt += fail_w
+            with state_lock:
+                state["downloaded"][task_id] = sorted(done)
+                store.save_state(state)
 
     add_log(f"[{name}] 本轮结束: 成功 {ok_cnt} 个视频, 失败 {fail_cnt} 次")
 
@@ -673,7 +741,7 @@ def run_ai_ask(task, bit, settings, targets, force=False):
     close_override = task.get("close_after_publish")
     close_after = bool(settings.get("close_window_after_publish", True)) if close_override is None else bool(close_override)
     today = dt.date.today().isoformat()
-    ok_cnt, fail_cnt = 0, 0
+    concurrency = max(1, int(task.get("concurrency") or 2))
     add_log(
         f"[{name}] AI提问模式: 平台[{platform}], 目标 {len(targets)} 个窗口"
         + (f", URL变量[{url_var}]" if url_var else "")
@@ -681,38 +749,39 @@ def run_ai_ask(task, bit, settings, targets, force=False):
         + ("(忽略已达次数,直接提问)" if limit > 0 and limit_mode == "force" else "")
         + (", 豆包视频生成模式" if video_mode else "")
         + (f", 变量补充: {ask_vars}" if ask_vars else "")
+        + f", 并发{concurrency}个窗口"
     )
-    for w in targets:
-        # 变量模式: URL来自窗口变量(resolve_targets_by_var 附带的 _var_value); 否则用任务内逐窗配置
+
+    def ask_worker(w):
+        ok_w, fail_w = 0, 0
         src = (w.get("_var_value") if url_var else "") or ((wvars.get(w["id"]) or {}).get("source_url") or "").strip()
         if not src:
             add_log(f"[{name}] 窗口[{w['name']}] 未配置对话框URL，跳过（每个目标窗口必须有自己的链接）", "error")
-            continue
-        # 防重复提问门禁: 上一个编号还没被视频发布任务消费(未发布)时不再提问; 强制执行时不拦截
+            return ok_w, fail_w
         if wait_consume and not force and store.has_pending_ask(w["id"], task.get("id") or ""):
             add_log(f"[{name}] 窗口[{w['name']}] 存在尚未被消费的提问编号，等待消费后再提问（防止重复提问堆叠）", "warning")
-            continue
+            return ok_w, fail_w
         if limit > 0 and limit_mode != "force":
-            # record模式(默认): 按本任务的成功发送记录计数(待发布+已发布均计入), 不开窗查询
             asked = store.count_asks_on_date(today, window_id=w["id"], task_id=task.get("id") or "")
             add_log(f"[{name}] 窗口[{w['name']}] 本任务今日已成功提问 {asked}/{limit} 次(含待发布/已发布)")
             if asked >= limit:
                 add_log(f"[{name}] 窗口[{w['name']}] 今日已达提问上限({limit})，跳过")
-                continue
+                return ok_w, fail_w
         elif limit_mode == "force":
             add_log(f"[{name}] 窗口[{w['name']}] 强制提问模式: 忽略今日次数判断, 直接开窗提问")
         try:
-            # 提问唯一编号: 每窗口每次提问生成独立编号, 附加到提示词并登记,
-            # AI回复须原样带回; 发布侧凭该编号判断"已提问未发布/已发布"避免重复发布
             ask_mark = build_ask_mark()
             win_prompt = prompt + _APPENDIX_TMPL.format(mark=ask_mark)
             add_log(f"[{name}] 窗口[{w['name']}] 本次任务编号: {ask_mark}")
             ask_in_chat(bit, settings, src, w, win_prompt, wait_s, ask_vars=ask_vars, video_mode=video_mode, close_after=close_after)
             store.record_ask(ask_mark, w["id"], task.get("id") or "")
-            ok_cnt += 1
+            ok_w += 1
         except Exception as e:
-            fail_cnt += 1
+            fail_w += 1
             add_log(f"[{name}] 窗口[{w['name']}] 提问失败: {e}", "error")
+        return ok_w, fail_w
+
+    ok_cnt, fail_cnt = run_concurrent(targets, ask_worker, concurrency)
     add_log(f"[{name}] 本轮结束: 成功提问 {ok_cnt} 个窗口, 失败 {fail_cnt} 次")
 
 

@@ -38,6 +38,24 @@ def _ensure_var_defs():
 
 app = FastAPI(title="Bit Video Publisher", lifespan=lifespan)
 
+# 窗口列表缓存(避免 /api/asks 每次都请求比特浏览器)
+_win_cache = {"data": {}, "ts": 0.0}
+_WIN_CACHE_TTL = 30  # 秒
+
+
+def _window_names(bit: BitClient):
+    import time
+    now = time.time()
+    if now - _win_cache["ts"] < _WIN_CACHE_TTL:
+        return _win_cache["data"]
+    try:
+        names = {w["id"]: (w.get("name") or "") for w in bit.list_windows()}
+        _win_cache["data"] = names
+        _win_cache["ts"] = now
+        return names
+    except Exception:
+        return _win_cache["data"]
+
 
 def _bit() -> BitClient:
     return BitClient(store.load_settings())
@@ -448,11 +466,7 @@ def del_var_def(body: dict = Body(...)):
 @app.get("/api/asks")
 def get_asks():
     items = store.list_asks()
-    names = {}
-    try:
-        names = {w["id"]: (w.get("name") or "") for w in _bit().list_windows()}
-    except Exception:
-        pass  # 比特浏览器离线时仅显示窗口ID前缀
+    names = _window_names(_bit())
     for it in items:
         it["window_name"] = names.get(it.get("window_id"), "") or f"{(it.get('window_id') or '')[:8]}…"
     return {"items": items}
@@ -522,8 +536,8 @@ def batch_configure(body: dict = Body(...)):
 # ---------------- 日志 ----------------
 
 @app.get("/api/logs")
-def logs(after: int = 0):
-    return {"entries": get_logs(after), "last_id": last_id()}
+def logs(after: int = 0, limit: int = 200):
+    return {"entries": get_logs(after, limit), "last_id": last_id()}
 
 
 # ---------------- 前端页面 ----------------

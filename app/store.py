@@ -131,6 +131,7 @@ TASK_DEFAULTS = {
     "close_after_publish": None,
     "consume_ask": False,  # video_publish: 消费AI提问模式(按任务编号定位回复并发布)
     "consume_ask_task_id": "",  # video_publish: 绑定的AI提问任务ID(空=不限)
+    "concurrency": 2,  # 任务执行并发窗口数, 默认2
 }
 
 

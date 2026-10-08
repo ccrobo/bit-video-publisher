@@ -51,7 +51,7 @@ def _publish(bitclient, settings, window, video_path, caption, title=""):
         page = ctx.new_page()
         page.goto(upload_url, wait_until="domcontentloaded", timeout=60000)
         try:
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_load_state("load", timeout=8000)
         except Exception:
             pass
         if "/login" in (page.url or ""):

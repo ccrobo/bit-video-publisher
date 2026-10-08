@@ -1,6 +1,7 @@
 """AI 提问任务: 在比特浏览器窗口中打开指定平台的对话框URL, 自动输入提示词并发送"""
 import datetime as dt
 import time
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
@@ -49,6 +50,30 @@ _INPUT_HAS_TEXT_JS = """
 }
 """
 
+# 输入框诊断: 返回当前可见输入元素的类型/类名/文本长度, 用于排查注入失败
+_INPUT_DIAG_JS = """
+() => {
+  const vis = el => {
+    const r = el.getBoundingClientRect();
+    const st = window.getComputedStyle(el);
+    return r.width > 30 && r.height >= 15 && st.display !== 'none' && st.visibility !== 'hidden';
+  };
+  const tas = [...document.querySelectorAll('textarea')].filter(vis);
+  if (tas.length) {
+    const t = tas[tas.length - 1];
+    return { type: 'textarea', count: tas.length, cls: (t.className || '').toString().slice(0,80),
+             textLen: (t.value || '').length, visible: vis(t), rect: JSON.stringify(t.getBoundingClientRect()) };
+  }
+  const eds = [...document.querySelectorAll('[contenteditable="true"]')].filter(vis);
+  if (eds.length) {
+    const e = eds[eds.length - 1];
+    return { type: 'contenteditable', count: eds.length, cls: (e.className || '').toString().slice(0,80),
+             textLen: (e.innerText || '').length, visible: vis(e), rect: JSON.stringify(e.getBoundingClientRect()) };
+  }
+  return { type: 'none', count: 0 };
+}
+"""
+
 # 发送按钮(兜底: Enter 无效时点击); 兼容图标按钮的 aria-label/id 含 send
 _FIND_SEND_JS = """
 () => {
@@ -78,7 +103,7 @@ _FIND_VIDEO_MODE_JS = """
     return r.width > 10 && r.height > 10 && r.left < window.innerWidth && r.top < window.innerHeight;
   };
   const hasText = (el, kws) => {
-    const t = (el.innerText || el.textContent || '').replace(/\s+/g, '').trim();
+    const t = (el.innerText || el.textContent || '').replace(/\\s+/g, '').trim();
     if (!t) return false;
     for (const k of kws) if (t.includes(k)) return true;
     return false;
@@ -158,7 +183,7 @@ def read_chat_text(bitclient, chat_url, window, settle_seconds=6):
         page = ctx.new_page()
         page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
         try:
-            page.wait_for_load_state("networkidle", timeout=20000)
+            page.wait_for_load_state("load", timeout=8000)
         except Exception:
             pass
         cur = page.url or ""
@@ -231,7 +256,7 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30,
 
         page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
         try:
-            page.wait_for_load_state("networkidle", timeout=20000)
+            page.wait_for_load_state("load", timeout=8000)
         except Exception:
             pass
 
@@ -298,6 +323,7 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30,
             has_text = page.evaluate(_INPUT_HAS_TEXT_JS)
         except Exception:
             pass
+        add_log(f"[{window['name']}] 提示词注入后输入框状态: has_text={has_text}")
 
         # 回车发送; 未清空则点发送按钮兜底
         sent = False
@@ -309,6 +335,7 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30,
                 has_text2 = page.evaluate(_INPUT_HAS_TEXT_JS)
             except Exception:
                 pass
+            add_log(f"[{window['name']}] 回车后输入框状态: has_text2={has_text2}")
             sent = (has_text is True and has_text2 is False) or (has_text2 is False and has_text is None)
         except Exception:
             pass
@@ -318,6 +345,7 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30,
                 spos = page.evaluate(_FIND_SEND_JS)
             except Exception:
                 spos = None
+            add_log(f"[{window['name']}] 发送按钮定位结果: {'找到' if spos else '未找到'}")
             if spos:
                 try:
                     page.mouse.click(spos["x"], spos["y"])
@@ -326,11 +354,25 @@ def ask_in_chat(bitclient, settings, chat_url, window, prompt, wait_seconds=30,
                 except Exception:
                     pass
         if not sent:
+            # 诊断: 打印输入框详情并截图
+            try:
+                diag = page.evaluate(_INPUT_DIAG_JS)
+                add_log(f"[{window['name']}] 输入框诊断: {diag}", "warning")
+            except Exception:
+                pass
+            try:
+                shot = page.screenshot(type="png")
+                p = Path(__file__).resolve().parent.parent / "logs" / f"ask_fail_{window['id']}_{int(time.time())}.png"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(shot)
+                add_log(f"[{window['name']}] 失败截图已保存: {p}", "warning")
+            except Exception:
+                pass
             # 无法确认时以输入框内容已注入为准, 不中断流程
             if has_text:
                 add_log(f"[{window['name']}] 提示词已注入，回车/发送按钮结果未确认，按已发送处理", "warning")
             else:
-                raise RuntimeError(f"窗口[{window['name']}] 提示词发送失败，请检查页面状态")
+                raise RuntimeError(f"窗口[{window['name']}] 提示词发送失败，请检查页面状态（输入框诊断见上方日志）")
 
         wait_s = max(5, int(wait_seconds or 30))
         add_log(f"[{window['name']}] 已发送提示词（{len(final_prompt)}字），等待生成 {wait_s} 秒...")

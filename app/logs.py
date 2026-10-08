@@ -22,9 +22,12 @@ def add_log(msg, level="info"):
     print(f"[{entry['time']}] [{level}] {msg}", flush=True)
 
 
-def get_logs(after_id=0):
+def get_logs(after_id=0, limit=200):
     with _lock:
-        return [e for e in _buffer if e["id"] > after_id]
+        items = [e for e in _buffer if e["id"] > after_id]
+    if limit and limit > 0:
+        items = items[-limit:]
+    return items
 
 
 def last_id():
